@@ -1,7 +1,34 @@
 import { randomUUID } from "node:crypto";
 
 import { config } from "../config.js";
-import { asObject, HttpError } from "../platform.js";
+import { HttpError } from "../platform.js";
+
+type JsonRecord = Record<string, unknown>;
+
+export type NationalShipmentOrder = {
+  address?: unknown;
+  customer_email?: string | null;
+  customer_phone?: string | null;
+  total_mxn?: number | string | null;
+};
+
+export type NationalShipmentInput = {
+  printing_format?: string;
+  declared_value?: number;
+  consignment_note?: string;
+  package_type?: string;
+};
+
+export type NationalShipmentResult = {
+  provider_shipment_id: string;
+  tracking_number: string;
+  tracking_carrier: string;
+  tracking_url: unknown;
+  label_url: unknown;
+  raw: unknown;
+};
+
+export type TrackingEvent = JsonRecord;
 
 export type ShippingQuote = {
   quote_id: string;
@@ -18,12 +45,18 @@ async function accessToken(): Promise<string> {
   if (config.SKYDROPX_SCOPE) form.set("scope", config.SKYDROPX_SCOPE);
   const response = await fetch(`${config.SKYDROPX_BASE_URL}/api/v1/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: form });
   if (!response.ok) throw new HttpError(503, `Skydropx OAuth falló (${response.status})`);
-  const token = String(asObject(await response.json()).access_token ?? "");
+  const token = String(toRecord(await response.json()).access_token ?? "");
   if (!token) throw new HttpError(503, "Skydropx no devolvió access_token");
   return token;
 }
 
-function findDeep(value: unknown, key: string): any {
+function toRecord(value: unknown): JsonRecord {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as JsonRecord
+    : {};
+}
+
+function findDeep(value: unknown, key: string): unknown {
   if (Array.isArray(value)) for (const item of value) { const found = findDeep(item, key); if (found !== undefined) return found; }
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
@@ -33,26 +66,36 @@ function findDeep(value: unknown, key: string): any {
   return undefined;
 }
 
-function ratesFrom(payload: any, quotationId?: string): ShippingQuote[] {
-  const candidates = [payload?.rates, payload?.data?.rates, payload?.data?.attributes?.rates].find(Array.isArray) ?? [];
-  return candidates.map((rate: any) => ({
-    quote_id: String(rate.id ?? rate.rate_id),
+function nestedRecord(value: unknown, ...path: string[]): JsonRecord {
+  return path.reduce<JsonRecord>((record, segment) => toRecord(record[segment]), toRecord(value));
+}
+
+export function ratesFrom(payload: unknown, quotationId?: string): ShippingQuote[] {
+  const root = toRecord(payload);
+  const data = nestedRecord(root, "data");
+  const attributes = nestedRecord(data, "attributes");
+  const candidates = [root.rates, data.rates, attributes.rates].find(Array.isArray) ?? [];
+
+  return candidates.map((candidate) => {
+    const rate = toRecord(candidate);
+    return {
+    quote_id: String(rate.id ?? rate.rate_id ?? ""),
     provider: String(rate.provider_name ?? rate.carrier_name ?? "skydropx"),
     service: String(rate.provider_service_name ?? rate.provider_service_code ?? "standard"),
     price_mxn: Math.round(Number(rate.total ?? rate.amount ?? rate.price ?? 0)),
     eta_days: Math.max(1, Math.round(Number(rate.days ?? 5))),
     quotation_id: quotationId
-  })).filter((rate: ShippingQuote) => rate.quote_id && rate.price_mxn >= 0);
+  }; }).filter((rate) => rate.quote_id.length > 0 && Number.isFinite(rate.price_mxn) && rate.price_mxn >= 0);
 }
 
-function destination(address: Record<string, any>) {
+function destination(address: JsonRecord) {
   return {
     country_code: address.country ?? "MX", postal_code: address.postal_code,
     area_level1: address.state, area_level2: address.city, area_level3: address.city
   };
 }
 
-export async function quoteNational(address: Record<string, any>, orderId?: string): Promise<ShippingQuote[]> {
+export async function quoteNational(address: JsonRecord, orderId?: string): Promise<ShippingQuote[]> {
   if (config.SKYDROPX_MODE === "mock") return [{ quote_id: "national-standard", provider: "skydropx", service: "standard", price_mxn: config.NATIONAL_SHIPPING_COST_MXN, eta_days: 5 }];
   const token = await accessToken();
   const response = await fetch(`${config.SKYDROPX_BASE_URL}/api/v1/quotations`, {
@@ -66,7 +109,8 @@ export async function quoteNational(address: Record<string, any>, orderId?: stri
   });
   if (!response.ok) throw new HttpError(503, `Skydropx quotation falló (${response.status}): ${await response.text()}`);
   let payload = await response.json();
-  const quotationId = String((payload as any)?.id ?? (payload as any)?.data?.id ?? "") || undefined;
+  const payloadRecord = toRecord(payload);
+  const quotationId = String(payloadRecord.id ?? nestedRecord(payloadRecord, "data").id ?? "") || undefined;
   let rates = ratesFrom(payload, quotationId);
   if (!rates.length && quotationId) {
     const lookup = await fetch(`${config.SKYDROPX_BASE_URL}/api/v1/quotations/${quotationId}`, { headers: { authorization: `Bearer ${token}` } });
@@ -76,14 +120,18 @@ export async function quoteNational(address: Record<string, any>, orderId?: stri
   return rates;
 }
 
-export async function createNationalShipment(order: any, rateId: string, input: Record<string, any>): Promise<any> {
+export async function createNationalShipment(
+  order: NationalShipmentOrder,
+  rateId: string,
+  input: NationalShipmentInput
+): Promise<NationalShipmentResult> {
   if (config.SKYDROPX_MODE === "mock") {
     const id = `mock_${randomUUID()}`;
     const tracking_number = `SAUT${id.replaceAll("-", "").slice(-12).toUpperCase()}`;
     return { provider_shipment_id: id, tracking_number, tracking_carrier: "Skydropx", tracking_url: `https://mock.skydropx.local/track/${tracking_number}`, label_url: `https://mock.skydropx.local/labels/${id}.pdf`, raw: { mode: "mock" } };
   }
   const token = await accessToken();
-  const address = asObject(order.address);
+  const address = toRecord(order.address);
   const response = await fetch(`${config.SKYDROPX_BASE_URL}/api/v1/shipments/`, {
     method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ shipment: {
@@ -95,19 +143,33 @@ export async function createNationalShipment(order: any, rateId: string, input: 
   });
   if (!response.ok) throw new HttpError(503, `Skydropx shipment falló (${response.status}): ${await response.text()}`);
   const payload = await response.json();
-  const provider_shipment_id = String((payload as any)?.data?.id ?? (payload as any)?.id ?? "");
+  const payloadRecord = toRecord(payload);
+  const provider_shipment_id = String(nestedRecord(payloadRecord, "data").id ?? payloadRecord.id ?? "");
   const tracking_number = String(findDeep(payload, "tracking_number") ?? "");
   if (!provider_shipment_id || !tracking_number) throw new HttpError(503, "Skydropx no devolvió shipment/tracking");
   return { provider_shipment_id, tracking_number, tracking_carrier: String(findDeep(payload, "carrier_name") ?? "Skydropx"), tracking_url: findDeep(payload, "tracking_url_provider") ?? null, label_url: findDeep(payload, "label_url") ?? null, raw: payload };
 }
 
-export async function fetchTracking(trackingNumber: string, carrier: string): Promise<{ delivered: boolean; events: any[]; raw: unknown }> {
+export async function fetchTracking(
+  trackingNumber: string,
+  carrier: string
+): Promise<{ delivered: boolean; events: TrackingEvent[]; raw: unknown }> {
   if (config.SKYDROPX_MODE === "mock") return { delivered: false, events: [{ status: "in_transit", description: "En tránsito", happened_at: new Date().toISOString() }], raw: { mode: "mock" } };
   const token = await accessToken();
   const url = new URL(`${config.SKYDROPX_BASE_URL}/api/v1/shipments/tracking`); url.searchParams.set("tracking_number", trackingNumber); url.searchParams.set("carrier_name", carrier);
   const response = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
   if (!response.ok) throw new HttpError(503, `Skydropx tracking falló (${response.status})`);
-  const raw = await response.json(); const data = Array.isArray((raw as any)?.data) ? (raw as any).data : [];
-  const events = data.map((item: any) => item.attributes ?? item); const delivered = events.some((event: any) => `${event.description ?? ""} ${event.status ?? event.substatus ?? ""}`.toLowerCase().match(/delivered|entregado/));
+  const raw: unknown = await response.json();
+  const rawData = toRecord(raw).data;
+  const data = Array.isArray(rawData) ? rawData : [];
+  const events = data.map((candidate): TrackingEvent => {
+    const item = toRecord(candidate);
+    return Object.keys(toRecord(item.attributes)).length > 0 ? toRecord(item.attributes) : item;
+  });
+  const delivered = events.some((event) =>
+    `${String(event.description ?? "")} ${String(event.status ?? event.substatus ?? "")}`
+      .toLowerCase()
+      .match(/delivered|entregado/)
+  );
   return { delivered, events, raw };
 }
