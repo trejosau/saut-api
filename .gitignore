@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build and generated output
+dist/
+build/
+coverage/
+generated/prisma/
+*.tsbuildinfo
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+!.env.*.example
+
+# Logs and caches
+*.log
+npm-debug.log*
+.cache/
+.tmp/
+tmp/
+
+# Local migration artifacts
+backups/
+*.dump
+
+# OS and IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
