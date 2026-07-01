@@ -37,6 +37,20 @@ describe("PrismaDataSource", () => {
     await expect(dataSource.query("select 1")).rejects.toBe(error);
   });
 
+  it("delegates compatibility transactions to the shared pool", async () => {
+    const transactionClient = { query: vi.fn(), release: vi.fn() };
+    vi.mocked(pool.connect).mockResolvedValue(transactionClient as never);
+
+    await expect(dataSource.connect()).resolves.toBe(transactionClient);
+    expect(pool.connect).toHaveBeenCalledOnce();
+  });
+
+  it("pings through a parameter-safe Prisma tagged query", async () => {
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([{ value: 1 }]);
+    await expect(dataSource.ping()).resolves.toBeUndefined();
+    expect(prisma.$queryRaw).toHaveBeenCalledOnce();
+  });
+
   it("closes Prisma and its shared PostgreSQL pool", async () => {
     await dataSource.close();
 
