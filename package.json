@@ -4,14 +4,19 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "npm run bootstrap && tsx watch src/index.ts",
+    "dev": "npm run prisma:deploy && npm run bootstrap && tsx watch src/index.ts",
     "start": "node dist/src/index.js",
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run prisma:generate && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src tests --max-warnings=0",
     "test": "vitest run",
     "e2e": "node tests/e2e-stack.mjs",
-    "bootstrap": "tsx src/bootstrap.ts"
+    "bootstrap": "tsx src/bootstrap.ts",
+    "prisma:deploy": "prisma migrate deploy",
+    "prisma:generate": "prisma generate",
+    "prisma:status": "prisma migrate status",
+    "prisma:validate": "prisma validate",
+    "postinstall": "prisma generate"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.850.0",
@@ -20,8 +25,8 @@
     "@nestjs/common": "^11.1.27",
     "@nestjs/core": "^11.1.27",
     "@nestjs/platform-fastify": "^11.1.27",
+    "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
-    "drizzle-orm": "^0.45.2",
     "fastify": "5.8.5",
     "ioredis": "^5.6.1",
     "jose": "^6.0.11",

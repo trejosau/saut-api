@@ -1,9 +1,10 @@
 import type { S3Client } from "@aws-sdk/client-s3";
 import type { FastifyRequest } from "fastify";
 import type { Redis } from "ioredis";
-import type pg from "pg";
 import type Stripe from "stripe";
 import type { WebSocket } from "ws";
+
+import type { PrismaDataSource } from "./database/prisma-data-source.js";
 
 export type Actor = {
   accountId: string;
@@ -14,7 +15,7 @@ export type Actor = {
 };
 
 export type AppContext = {
-  pool: pg.Pool;
+  database: PrismaDataSource;
   redis: Redis;
   s3: S3Client;
   stripe: Stripe;
