@@ -18,18 +18,23 @@ export type Queryable = {
   ): Promise<QueryResult<Row>>;
 };
 
+type PrismaDataSourceDependencies = {
+  pool?: pg.Pool;
+  client?: PrismaClient;
+};
+
 export class PrismaDataSource implements Queryable {
   private readonly pool: pg.Pool;
   readonly client: PrismaClient;
 
-  constructor(connectionString = config.DATABASE_URL) {
-    this.pool = new Pool({
+  constructor(connectionString = config.DATABASE_URL, dependencies: PrismaDataSourceDependencies = {}) {
+    this.pool = dependencies.pool ?? new Pool({
       connectionString,
       max: config.NODE_ENV === "production" ? 20 : 10,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 10_000
     });
-    this.client = new PrismaClient({ adapter: new PrismaPg(this.pool) });
+    this.client = dependencies.client ?? new PrismaClient({ adapter: new PrismaPg(this.pool) });
   }
 
   async query<Row = any>(
