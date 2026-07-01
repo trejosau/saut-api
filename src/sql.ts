@@ -1,4 +1,4 @@
-import type { Queryable } from "./db.js";
+import type { Queryable } from "./database/prisma-data-source.js";
 import { HttpError } from "./platform.js";
 
 function quote(value: string): string {

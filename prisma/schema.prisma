@@ -1,8 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client"
   output   = "../generated/prisma"
@@ -10,4 +5,808 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+}
+
+model account_identities {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  account_id       String    @db.Uuid
+  provider         String
+  provider_subject String
+  email            String?
+  email_normalized String?
+  email_verified   Boolean   @default(false)
+  created_at       DateTime  @default(now()) @db.Timestamptz(6)
+  last_used_at     DateTime? @db.Timestamptz(6)
+  accounts         accounts  @relation(fields: [account_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([provider, provider_subject])
+}
+
+model account_permission_overrides {
+  id                     String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  account_id             String      @db.Uuid
+  permission_id          String      @db.Uuid
+  effect                 String
+  reason                 String?
+  assigned_by_account_id String?     @db.Uuid
+  created_at             DateTime    @default(now()) @db.Timestamptz(6)
+  updated_at             DateTime    @default(now()) @db.Timestamptz(6)
+  accounts               accounts    @relation(fields: [account_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  permissions            permissions @relation(fields: [permission_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([account_id, permission_id])
+}
+
+model account_roles {
+  id                     String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  account_id             String    @db.Uuid
+  role_id                String    @db.Uuid
+  assigned_by_account_id String?   @db.Uuid
+  created_at             DateTime  @default(now()) @db.Timestamptz(6)
+  expires_at             DateTime? @db.Timestamptz(6)
+  accounts               accounts  @relation(fields: [account_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  roles                  roles     @relation(fields: [role_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([account_id, role_id])
+}
+
+/// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
+model accounts {
+  id                           String                         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  actor_type                   String                         @default("customer")
+  status                       String                         @default("active")
+  display_name                 String?
+  primary_email                String?
+  created_at                   DateTime                       @default(now()) @db.Timestamptz(6)
+  updated_at                   DateTime                       @default(now()) @db.Timestamptz(6)
+  last_login_at                DateTime?                      @db.Timestamptz(6)
+  account_identities           account_identities[]
+  account_permission_overrides account_permission_overrides[]
+  account_roles                account_roles[]
+  sessions                     sessions[]
+}
+
+model analytics_events {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  event_ref          String?  @unique(map: "analytics_event_ref_uq")
+  event_type         String
+  order_id           String?  @db.Uuid
+  payment_attempt_id String?  @db.Uuid
+  support_case_id    String?  @db.Uuid
+  work_order_id      String?  @db.Uuid
+  publication_id     String?  @db.Uuid
+  collection_id      String?  @db.Uuid
+  drop_id            String?  @db.Uuid
+  item_type          String?
+  garment_type       String?
+  garment_model      String?
+  color              String?
+  size               String?
+  grammage_g         Int?
+  fit                String?
+  shipping_method    String?
+  shipping_provider  String?
+  status             String?
+  state_code         String?
+  quantity           Int?
+  amount_mxn         Int?
+  occurred_at        DateTime @default(now()) @db.Timestamptz(6)
+  payload            Json?
+  created_at         DateTime @default(now()) @db.Timestamptz(6)
+}
+
+model assets {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  object_key   String   @unique
+  file_name    String?
+  content_type String
+  visibility   String   @default("private")
+  category     String?
+  size_bytes   BigInt   @default(0)
+  etag         String?
+  created_at   DateTime @default(now()) @db.Timestamptz(6)
+  updated_at   DateTime @default(now()) @db.Timestamptz(6)
+}
+
+model audit_log {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  account_id    String?  @db.Uuid
+  actor_type    String
+  action        String
+  resource_type String
+  resource_id   String?
+  reason        String?
+  payload       Json?
+  ip            String?
+  user_agent    String?
+  created_at    DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([created_at(sort: Desc)], map: "audit_log_created_idx")
+}
+
+model auth_events {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  event_type       String
+  account_id       String?  @db.Uuid
+  session_id       String?  @db.Uuid
+  email_normalized String?
+  ip               String?
+  user_agent       String?
+  meta             Json?
+  created_at       DateTime @default(now()) @db.Timestamptz(6)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model cart_items {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cart_id           String   @db.Uuid
+  item_type         String
+  publication_id    String?  @db.Uuid
+  publication_slug  String?
+  design_variant_id String?  @db.Uuid
+  garment_type      String
+  garment_model     String   @default("")
+  color             String
+  size              String
+  grammage_g        Int
+  fit               String   @default("")
+  quantity          Int
+  unit_price_mxn    Int
+  custom_front      Json?
+  custom_back       Json?
+  custom_note       String?
+  improve_quality   Boolean  @default(false)
+  drop_id           String?  @db.Uuid
+  drop_total_limit  Int?
+  meta              Json?
+  created_at        DateTime @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime @default(now()) @db.Timestamptz(6)
+  carts             carts    @relation(fields: [cart_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model carts {
+  id                String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  status            String              @default("active")
+  guest_session_id  String?
+  account_id        String?             @db.Uuid
+  created_at        DateTime            @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime            @default(now()) @db.Timestamptz(6)
+  cart_items        cart_items[]
+  checkout_sessions checkout_sessions[]
+}
+
+model checkout_sessions {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cart_id            String    @db.Uuid
+  status             String    @default("pending")
+  email              String
+  phone              String
+  address            Json
+  shipping_method    String
+  shipping_quote_id  String?
+  shipping_provider  String?
+  shipping_service   String?
+  shipping_cost_mxn  Int       @default(0)
+  shipping_quotes    Json?
+  subtotal_mxn       Int
+  total_mxn          Int
+  currency           String    @default("MXN")
+  paid_at            DateTime? @db.Timestamptz(6)
+  payment_attempt_id String?   @db.Uuid
+  order_id           String?   @db.Uuid
+  created_at         DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime  @default(now()) @db.Timestamptz(6)
+  carts              carts     @relation(fields: [cart_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model collection_set_items {
+  id               String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  collection_id    String           @db.Uuid
+  publication_id   String           @db.Uuid
+  position_index   Int              @default(0)
+  collections_sets collections_sets @relation(fields: [collection_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  publications     publications     @relation(fields: [publication_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([collection_id, publication_id])
+}
+
+model collections_sets {
+  id                   String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug                 String                 @unique
+  title                String
+  description          String?
+  visibility           String                 @default("public")
+  cover_asset_id       String?                @db.Uuid
+  informative_image_id String?                @db.Uuid
+  created_at           DateTime               @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime               @default(now()) @db.Timestamptz(6)
+  collection_set_items collection_set_items[]
+}
+
+model customizer_pricing_configs {
+  id                        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  base_price_mxn            Int
+  per_image_price_mxn       Int
+  included_images           Int      @default(0)
+  max_images                Int      @default(10)
+  quality_upgrade_price_mxn Int      @default(0)
+  is_active                 Boolean  @default(true)
+  created_at                DateTime @default(now()) @db.Timestamptz(6)
+  updated_at                DateTime @default(now()) @db.Timestamptz(6)
+}
+
+model design_variants {
+  id                      String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  design_id               String                @db.Uuid
+  code                    String
+  label                   String
+  dtf_asset_id            String                @db.Uuid
+  public_preview_asset_id String?               @db.Uuid
+  front_design_url        String?
+  back_design_url         String?
+  is_active               Boolean               @default(true)
+  sort_rank               Int                   @default(0)
+  created_at              DateTime              @default(now()) @db.Timestamptz(6)
+  updated_at              DateTime              @default(now()) @db.Timestamptz(6)
+  designs                 designs               @relation(fields: [design_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  publication_mockups     publication_mockups[]
+
+  @@unique([design_id, code])
+}
+
+model designs {
+  id                       String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name                     String
+  has_variants             Boolean           @default(false)
+  default_front_design_url String?
+  default_back_design_url  String?
+  created_at               DateTime          @default(now()) @db.Timestamptz(6)
+  updated_at               DateTime          @default(now()) @db.Timestamptz(6)
+  design_variants          design_variants[]
+  publications             publications[]
+}
+
+model drop_counters {
+  drop_id     String   @id @db.Uuid
+  last_number Int      @default(0)
+  updated_at  DateTime @default(now()) @db.Timestamptz(6)
+}
+
+model drop_items {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  drop_id        String       @db.Uuid
+  publication_id String       @db.Uuid
+  position_index Int          @default(0)
+  drops          drops        @relation(fields: [drop_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  publications   publications @relation(fields: [publication_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([drop_id, publication_id])
+}
+
+model drops {
+  id                   String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug                 String       @unique
+  title                String
+  description          String?
+  status               String       @default("preview")
+  starts_at            DateTime?    @db.Timestamptz(6)
+  ends_at              DateTime?    @db.Timestamptz(6)
+  capacity_total       Int?
+  visibility           String       @default("public")
+  cover_asset_id       String?      @db.Uuid
+  informative_image_id String?      @db.Uuid
+  created_at           DateTime     @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime     @default(now()) @db.Timestamptz(6)
+  drop_items           drop_items[]
+}
+
+model informative_images {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  scope_type String
+  scope_id   String?  @db.Uuid
+  asset_id   String   @db.Uuid
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+}
+
+model inventory_items {
+  id                  String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  garment_type        String
+  garment_model       String                @default("")
+  color               String
+  size                String
+  grammage_g          Int
+  fit                 String                @default("")
+  quantity            Int                   @default(0)
+  supplier_cost_mxn   Decimal               @default(0) @db.Decimal(12, 2)
+  created_at          DateTime              @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime              @default(now()) @db.Timestamptz(6)
+  inventory_movements inventory_movements[]
+  stock_entries       stock_entries[]
+
+  @@unique([garment_type, garment_model, color, size, grammage_g, fit])
+}
+
+model inventory_movements {
+  id                String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  inventory_item_id String          @db.Uuid
+  movement_type     String
+  quantity          Int
+  reason            String?
+  actor             String?
+  source_ref        String?
+  created_at        DateTime        @default(now()) @db.Timestamptz(6)
+  inventory_items   inventory_items @relation(fields: [inventory_item_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([inventory_item_id, created_at(sort: Desc)], map: "inventory_movements_item_idx")
+}
+
+model local_address_changes {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  shipment_id String?  @db.Uuid
+  order_id    String   @db.Uuid
+  old_address Json
+  new_address Json
+  reason      String?
+  changed_by  String?
+  created_at  DateTime @default(now()) @db.Timestamptz(6)
+}
+
+model local_delivery_evidences {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  shipment_id String    @db.Uuid
+  photo_url   String?
+  notes       String?
+  created_by  String?
+  created_at  DateTime  @default(now()) @db.Timestamptz(6)
+  shipments   shipments @relation(fields: [shipment_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model login_challenges {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  method           String
+  email            String
+  email_normalized String
+  code_hash        String
+  expires_at       DateTime  @db.Timestamptz(6)
+  consumed_at      DateTime? @db.Timestamptz(6)
+  attempts         Int       @default(0)
+  max_attempts     Int       @default(5)
+  send_count       Int       @default(1)
+  last_sent_at     DateTime? @db.Timestamptz(6)
+  ip               String?
+  user_agent       String?
+  created_at       DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@index([email_normalized, created_at(sort: Desc)], map: "login_challenges_email_idx")
+}
+
+model migration_runs {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  migration_key String    @unique
+  status        String
+  details       Json?
+  started_at    DateTime  @default(now()) @db.Timestamptz(6)
+  completed_at  DateTime? @db.Timestamptz(6)
+}
+
+model notification_deliveries {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  template_key        String
+  channel             String
+  recipient           String
+  payload             Json
+  status              String
+  attempts            Int       @default(0)
+  last_error          String?
+  provider_message_id String?
+  next_retry_at       DateTime? @db.Timestamptz(6)
+  delivered_at        DateTime? @db.Timestamptz(6)
+  created_at          DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime  @default(now()) @db.Timestamptz(6)
+}
+
+model order_items {
+  id                String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  order_id          String       @db.Uuid
+  cart_item_id      String       @db.Uuid
+  item_type         String
+  publication_id    String?      @db.Uuid
+  publication_slug  String?
+  design_variant_id String?      @db.Uuid
+  garment_type      String
+  garment_model     String
+  color             String
+  size              String
+  grammage_g        Int
+  fit               String
+  quantity          Int
+  unit_price_mxn    Int
+  drop_id           String?      @db.Uuid
+  drop_total_limit  Int?
+  snapshot          Json
+  created_at        DateTime     @default(now()) @db.Timestamptz(6)
+  orders            orders       @relation(fields: [order_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  work_orders       work_orders?
+}
+
+model order_state_history {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  order_id        String   @db.Uuid
+  previous_status String?
+  new_status      String
+  source          String
+  reason          String?
+  changed_by      String?
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+  orders          orders   @relation(fields: [order_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model orders {
+  id                  String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  checkout_session_id String                @unique @db.Uuid
+  payment_attempt_id  String                @db.Uuid
+  payment_reference   String
+  customer_email      String
+  customer_phone      String
+  shipping_method     String
+  shipping_cost_mxn   Int
+  subtotal_mxn        Int
+  total_mxn           Int
+  currency            String                @default("MXN")
+  address             Json
+  status              String                @default("paid")
+  tracking_number     String?
+  tracking_carrier    String?
+  tracking_url        String?
+  shipping_label_url  String?
+  drop_id             String?               @db.Uuid
+  drop_number         Int?
+  drop_total_limit    Int?
+  created_at          DateTime              @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime              @default(now()) @db.Timestamptz(6)
+  order_items         order_items[]
+  order_state_history order_state_history[]
+  work_orders         work_orders[]
+}
+
+model payment_attempts {
+  id                         String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  checkout_session_id        String                 @db.Uuid
+  status                     String
+  amount_mxn                 Int
+  currency                   String                 @default("MXN")
+  provider                   String
+  provider_payment_intent_id String?
+  provider_charge_id         String?
+  client_secret              String?
+  failure_reason             String?
+  metadata                   Json?
+  created_at                 DateTime               @default(now()) @db.Timestamptz(6)
+  updated_at                 DateTime               @default(now()) @db.Timestamptz(6)
+  payment_transactions       payment_transactions[]
+}
+
+model payment_transactions {
+  id                  String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  payment_attempt_id  String           @db.Uuid
+  checkout_session_id String           @db.Uuid
+  status              String
+  amount_mxn          Int
+  currency            String           @default("MXN")
+  provider            String
+  provider_charge_id  String?
+  refunded_amount_mxn Int              @default(0)
+  created_at          DateTime         @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime         @default(now()) @db.Timestamptz(6)
+  payment_attempts    payment_attempts @relation(fields: [payment_attempt_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  refunds             refunds[]
+}
+
+model permissions {
+  id                           String                         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  screen                       String
+  action                       String
+  description                  String?
+  created_at                   DateTime                       @default(now()) @db.Timestamptz(6)
+  updated_at                   DateTime                       @default(now()) @db.Timestamptz(6)
+  account_permission_overrides account_permission_overrides[]
+  role_permissions             role_permissions[]
+
+  @@unique([screen, action])
+}
+
+model publication_mockups {
+  id              String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  publication_id  String           @db.Uuid
+  variant_id      String?          @db.Uuid
+  garment_color   String?
+  mockup_asset_id String           @db.Uuid
+  view_side       String           @default("front")
+  mockup_url      String?
+  created_at      DateTime         @default(now()) @db.Timestamptz(6)
+  publications    publications     @relation(fields: [publication_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  design_variants design_variants? @relation(fields: [variant_id], references: [id], onUpdate: NoAction)
+}
+
+model publications {
+  id                     String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug                   String                 @unique
+  title                  String
+  description            String?
+  garment_type           String
+  garment_model          String?
+  design_id              String                 @db.Uuid
+  category               String
+  visibility             String                 @default("public")
+  is_active              Boolean                @default(true)
+  is_seasonal            Boolean                @default(false)
+  sort_rank              Int                    @default(0)
+  price_mxn              Int
+  cover_asset_id         String?                @db.Uuid
+  preview_front_asset_id String?                @db.Uuid
+  preview_back_asset_id  String?                @db.Uuid
+  informative_image_id   String?                @db.Uuid
+  viewer_asset_id        String?                @db.Uuid
+  front_print_x_pct      Float                  @default(34)
+  front_print_y_pct      Float                  @default(25)
+  front_print_w_pct      Float                  @default(32)
+  front_print_h_pct      Float                  @default(34)
+  back_print_x_pct       Float                  @default(32)
+  back_print_y_pct       Float                  @default(23)
+  back_print_w_pct       Float                  @default(36)
+  back_print_h_pct       Float                  @default(36)
+  created_at             DateTime               @default(now()) @db.Timestamptz(6)
+  updated_at             DateTime               @default(now()) @db.Timestamptz(6)
+  collection_set_items   collection_set_items[]
+  drop_items             drop_items[]
+  publication_mockups    publication_mockups[]
+  designs                designs                @relation(fields: [design_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model refunds {
+  id                     String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  payment_transaction_id String               @db.Uuid
+  reason                 String
+  amount_mxn             Int
+  status                 String
+  provider_refund_id     String?
+  created_at             DateTime             @default(now()) @db.Timestamptz(6)
+  updated_at             DateTime             @default(now()) @db.Timestamptz(6)
+  payment_transactions   payment_transactions @relation(fields: [payment_transaction_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+model role_permissions {
+  id            String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  role_id       String      @db.Uuid
+  permission_id String      @db.Uuid
+  created_at    DateTime    @default(now()) @db.Timestamptz(6)
+  permissions   permissions @relation(fields: [permission_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  roles         roles       @relation(fields: [role_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([role_id, permission_id])
+}
+
+model roles {
+  id               String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code             String             @unique
+  name             String
+  description      String?
+  is_system        Boolean            @default(false)
+  created_at       DateTime           @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime           @default(now()) @db.Timestamptz(6)
+  account_roles    account_roles[]
+  role_permissions role_permissions[]
+}
+
+model sales_pings {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  event_ref          String?  @unique(map: "sales_ping_event_ref_uq")
+  order_id           String   @db.Uuid
+  payment_attempt_id String?  @db.Uuid
+  publication_id     String?  @db.Uuid
+  publication_slug   String?
+  collection_id      String?  @db.Uuid
+  drop_id            String?  @db.Uuid
+  item_type          String?
+  garment_type       String?
+  garment_model      String?
+  color              String?
+  size               String?
+  grammage_g         Int?
+  fit                String?
+  quantity           Int
+  amount_mxn         Int
+  shipping_method    String
+  shipping_provider  String?
+  state_code         String?
+  occurred_at        DateTime @default(now()) @db.Timestamptz(6)
+  payload            Json?
+  created_at         DateTime @default(now()) @db.Timestamptz(6)
+}
+
+model season_config {
+  id         Int      @id @default(1)
+  is_enabled Boolean  @default(false)
+  updated_at DateTime @default(now()) @db.Timestamptz(6)
+}
+
+model sessions {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  account_id         String    @db.Uuid
+  refresh_token_hash String    @unique
+  created_at         DateTime  @default(now()) @db.Timestamptz(6)
+  expires_at         DateTime  @db.Timestamptz(6)
+  revoked_at         DateTime? @db.Timestamptz(6)
+  revoke_reason      String?
+  ip                 String?
+  user_agent         String?
+  last_seen_at       DateTime? @db.Timestamptz(6)
+  accounts           accounts  @relation(fields: [account_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model shipment_events {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  shipment_id String    @db.Uuid
+  event_type  String
+  payload     Json?
+  created_at  DateTime  @default(now()) @db.Timestamptz(6)
+  shipments   shipments @relation(fields: [shipment_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model shipments {
+  id                       String                     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  order_id                 String                     @unique @db.Uuid
+  shipping_method          String
+  status                   String
+  provider                 String?
+  provider_shipment_id     String?
+  quotation_id             String?
+  rate_id                  String?
+  tracking_number          String?
+  tracking_carrier         String?
+  tracking_url             String?
+  label_url                String?
+  local_route_date         DateTime?                  @db.Date
+  local_ready_at           DateTime?                  @db.Timestamptz(6)
+  out_for_delivery_at      DateTime?                  @db.Timestamptz(6)
+  shipped_at               DateTime?                  @db.Timestamptz(6)
+  delivered_at             DateTime?                  @db.Timestamptz(6)
+  failed_at                DateTime?                  @db.Timestamptz(6)
+  failed_attempts          Int                        @default(0)
+  created_at               DateTime                   @default(now()) @db.Timestamptz(6)
+  updated_at               DateTime                   @default(now()) @db.Timestamptz(6)
+  local_delivery_evidences local_delivery_evidences[]
+  shipment_events          shipment_events[]
+}
+
+model sku_pricing_rules {
+  id                 String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  garment_type       String
+  garment_model      String   @default("")
+  color              String
+  size               String
+  grammage_g         Int
+  fit                String   @default("")
+  sale_price_mxn     Int
+  provider_price_mxn Int      @default(0)
+  dtf_cost_mxn       Int      @default(0)
+  packaging_cost_mxn Int      @default(0)
+  is_active          Boolean  @default(true)
+  created_at         DateTime @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime @default(now()) @db.Timestamptz(6)
+
+  @@unique([garment_type, garment_model, color, size, grammage_g, fit])
+}
+
+model stock_entries {
+  id                String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  inventory_item_id String          @db.Uuid
+  quantity          Int
+  supplier_name     String?
+  unit_cost_mxn     Decimal?        @db.Decimal(12, 2)
+  source_ref        String?
+  created_at        DateTime        @default(now()) @db.Timestamptz(6)
+  inventory_items   inventory_items @relation(fields: [inventory_item_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model support_case_attachments {
+  id                    String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  case_id               String                @db.Uuid
+  message_id            String                @db.Uuid
+  asset_id              String?               @db.Uuid
+  file_url              String
+  file_name             String?
+  mime_type             String?
+  size_bytes            BigInt?
+  created_at            DateTime              @default(now()) @db.Timestamptz(6)
+  support_cases         support_cases         @relation(fields: [case_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  support_case_messages support_case_messages @relation(fields: [message_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model support_case_messages {
+  id                       String                     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  case_id                  String                     @db.Uuid
+  sender_type              String
+  sender_account_id        String?                    @db.Uuid
+  sender_label             String?
+  message                  String
+  is_internal              Boolean                    @default(false)
+  created_at               DateTime                   @default(now()) @db.Timestamptz(6)
+  support_case_attachments support_case_attachments[]
+  support_cases            support_cases              @relation(fields: [case_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model support_case_order_links {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  case_id       String        @db.Uuid
+  order_id      String        @db.Uuid
+  order_code    String
+  link_method   String
+  created_by    String?
+  created_at    DateTime      @default(now()) @db.Timestamptz(6)
+  support_cases support_cases @relation(fields: [case_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([case_id, order_id])
+}
+
+model support_cases {
+  id                       String                     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  status                   String                     @default("open")
+  reason                   String
+  priority                 String?
+  subject                  String?
+  customer_type            String
+  account_id               String?                    @db.Uuid
+  contact_email            String
+  contact_phone            String?
+  guest_email              String?
+  guest_order_code         String?
+  linked_order_id          String?                    @db.Uuid
+  linked_order_code        String?
+  is_order_related         Boolean                    @default(false)
+  metadata                 Json?
+  assigned_to              String?
+  created_by               String?
+  closed_at                DateTime?                  @db.Timestamptz(6)
+  last_message_at          DateTime?                  @db.Timestamptz(6)
+  created_at               DateTime                   @default(now()) @db.Timestamptz(6)
+  updated_at               DateTime                   @default(now()) @db.Timestamptz(6)
+  support_case_attachments support_case_attachments[]
+  support_case_messages    support_case_messages[]
+  support_case_order_links support_case_order_links[]
+}
+
+model work_order_failures {
+  id                 String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  work_order_id      String      @db.Uuid
+  order_id           String      @db.Uuid
+  order_item_id      String      @db.Uuid
+  reason_code        String
+  notes              String?
+  quantity           Int
+  merma_reference    String      @unique
+  inventory_response Json?
+  recorded_by        String?
+  created_at         DateTime    @default(now()) @db.Timestamptz(6)
+  work_orders        work_orders @relation(fields: [work_order_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model work_orders {
+  id                   String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  order_id             String                @db.Uuid
+  order_item_id        String                @unique @db.Uuid
+  status               String                @default("pending")
+  dtf_sent_to_print_at DateTime?             @db.Timestamptz(6)
+  dtf_printed_at       DateTime?             @db.Timestamptz(6)
+  dtf_applied_at       DateTime?             @db.Timestamptz(6)
+  packed_at            DateTime?             @db.Timestamptz(6)
+  shipped_at           DateTime?             @db.Timestamptz(6)
+  delivered_at         DateTime?             @db.Timestamptz(6)
+  failures_count       Int                   @default(0)
+  last_failure_at      DateTime?             @db.Timestamptz(6)
+  created_at           DateTime              @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime              @default(now()) @db.Timestamptz(6)
+  work_order_failures  work_order_failures[]
+  orders               orders                @relation(fields: [order_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  order_items          order_items           @relation(fields: [order_item_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 }

@@ -22,7 +22,7 @@ function validateSignature(assetId: string, query: Record<string, any>, mode: st
 }
 
 async function resolveAsset(context: AppContext, id: string): Promise<any> {
-  const asset = (await context.pool.query("select * from assets where id=$1", [id])).rows[0];
+  const asset = (await context.database.query("select * from assets where id=$1", [id])).rows[0];
   if (!asset) throw new HttpError(404, "Asset no encontrado");
   const publicUrl = asset.visibility === "public" ? `${config.S3_PUBLIC_ENDPOINT}/assets/${id}/download` : null;
   const expires = Math.floor(Date.now() / 1000) + 900;
@@ -38,7 +38,7 @@ async function signUpload(context: AppContext, body: Record<string, any>, reques
   const id = randomUUID();
   const safeName = String(body.file_name ?? id).replace(/[^a-zA-Z0-9._-]/g, "_");
   const objectKey = `${category}/${id}/${safeName}`;
-  await context.pool.query(`insert into assets(id,object_key,file_name,content_type,visibility,category)
+  await context.database.query(`insert into assets(id,object_key,file_name,content_type,visibility,category)
     values($1,$2,$3,$4,$5,$6)`, [id, objectKey, body.file_name ?? null, contentType, body.visibility === "public" ? "public" : "internal", category]);
   const ttl = Math.min(Math.max(Number(body.ttl_sec ?? 900), 60), 3600);
   const expires = Math.floor(Date.now() / 1000) + ttl;
@@ -66,18 +66,18 @@ export async function registerAssets(app: FastifyInstance, context: AppContext):
   app.get<{ Params: { asset_id: string } }>("/admin/assets/:asset_id/resolve", async (request) => resolveAsset(context, request.params.asset_id));
   app.put<{ Params: { asset_id: string } }>("/assets/:asset_id/upload", async (request, reply) => {
     validateSignature(request.params.asset_id, asObject(request.query), "upload");
-    const asset = (await context.pool.query("select * from assets where id=$1", [request.params.asset_id])).rows[0];
+    const asset = (await context.database.query("select * from assets where id=$1", [request.params.asset_id])).rows[0];
     if (!asset) throw new HttpError(404, "Asset no encontrado");
     const body = Buffer.isBuffer(request.body) ? request.body : Buffer.from(request.body as any);
     if (body.byteLength > 100 * 1024 * 1024) throw new HttpError(413, "Asset mayor a 100 MB");
     const contentType = String(request.headers["content-type"] ?? asset.content_type).split(";", 1)[0]!.toLowerCase();
     if (!allowedTypes.has(contentType)) throw new HttpError(400, "Tipo de archivo no permitido");
     const result = await context.s3.send(new PutObjectCommand({ Bucket: config.S3_BUCKET, Key: asset.object_key, Body: body, ContentType: contentType }));
-    await context.pool.query("update assets set content_type=$2,size_bytes=$3,etag=$4,updated_at=now() where id=$1", [asset.id, contentType, body.byteLength, result.ETag ?? null]);
+    await context.database.query("update assets set content_type=$2,size_bytes=$3,etag=$4,updated_at=now() where id=$1", [asset.id, contentType, body.byteLength, result.ETag ?? null]);
     reply.status(204).send();
   });
   app.get<{ Params: { asset_id: string } }>("/assets/:asset_id/download", async (request, reply) => {
-    const asset = (await context.pool.query("select * from assets where id=$1", [request.params.asset_id])).rows[0];
+    const asset = (await context.database.query("select * from assets where id=$1", [request.params.asset_id])).rows[0];
     if (!asset) throw new HttpError(404, "Asset no encontrado");
     if (asset.visibility !== "public") validateSignature(request.params.asset_id, asObject(request.query), "read");
     const object = await context.s3.send(new GetObjectCommand({ Bucket: config.S3_BUCKET, Key: asset.object_key }));

@@ -189,11 +189,12 @@ async function main(): Promise<void> {
   await admin.connect();
   try {
     await ensureTargetDatabase(admin);
-    const existingResult = await admin.query<{ datname: string }>(
-      "select datname from pg_database where datname = any($1::text[])",
-      [LEGACY_DATABASES]
-    );
-    const existing = existingResult.rows.map((row) => row.datname);
+    const existing = config.MIGRATION_IMPORT_LEGACY_DATABASES
+      ? (await admin.query<{ datname: string }>(
+          "select datname from pg_database where datname = any($1::text[])",
+          [LEGACY_DATABASES]
+        )).rows.map((row) => row.datname)
+      : [];
     const target = new Client({ connectionString: databaseUrl(TARGET_DATABASE) });
     await target.connect();
     try {
@@ -202,10 +203,11 @@ async function main(): Promise<void> {
       const seeds = resolve(root, "seeds");
       await applySqlDirectory(target, migrations);
 
-      const prior = await target.query<{ status: string }>(
-        "select status from migration_runs where migration_key = 'legacy-consolidation-v1'"
-      );
-      if (prior.rows[0]?.status !== "completed" && existing.length > 0) {
+      if (config.MIGRATION_IMPORT_LEGACY_DATABASES) {
+        const prior = await target.query<{ status: string }>(
+          "select status from migration_runs where migration_key = 'legacy-consolidation-v1'"
+        );
+        if (prior.rows[0]?.status !== "completed" && existing.length > 0) {
         await target.query(`
           insert into migration_runs (migration_key, status, details)
           values ('legacy-consolidation-v1', 'running', '{}'::jsonb)
@@ -227,12 +229,13 @@ async function main(): Promise<void> {
           "update migration_runs set status = 'completed', details = $1, completed_at = now() where migration_key = 'legacy-consolidation-v1'",
           [details]
         );
-      } else if (prior.rows[0]?.status !== "completed") {
-        await target.query(`
-          insert into migration_runs (migration_key, status, details, completed_at)
-          values ('legacy-consolidation-v1', 'completed', '{"fresh_install":true}'::jsonb, now())
-          on conflict (migration_key) do update set status = 'completed', details = excluded.details, completed_at = now()
-        `);
+        } else if (prior.rows[0]?.status !== "completed") {
+          await target.query(`
+            insert into migration_runs (migration_key, status, details, completed_at)
+            values ('legacy-consolidation-v1', 'completed', '{"fresh_install":true}'::jsonb, now())
+            on conflict (migration_key) do update set status = 'completed', details = excluded.details, completed_at = now()
+          `);
+        }
       }
 
       await applySqlDirectory(target, seeds);

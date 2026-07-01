@@ -77,10 +77,58 @@ const schema = z.object({
   PRICING_DEFAULT_CUSTOMIZER_BASE_PRICE_MXN: z.coerce.number().int().nonnegative().default(499),
   PRICING_DEFAULT_CUSTOMIZER_PER_IMAGE_PRICE_MXN: z.coerce.number().int().nonnegative().default(50),
   MIGRATION_BACKUP_DIR: z.string().default("./backups"),
-  MIGRATION_DROP_LEGACY_DATABASES: booleanValue.default("true")
+  MIGRATION_IMPORT_LEGACY_DATABASES: booleanValue.default("false"),
+  MIGRATION_DROP_LEGACY_DATABASES: booleanValue.default("false")
+}).superRefine((values, context) => {
+  if (values.NODE_ENV !== "production") return;
+
+  const unsafeSecrets: Array<[keyof typeof values, string]> = [
+    ["AUTH_CODE_SECRET", "dev-auth-code-secret"],
+    ["AUTH_TOKEN_SECRET", "dev-auth-token-secret-change-me"],
+    ["AUTH_INTERNAL_API_KEY", "dev-internal-auth-key"],
+    ["S3_SECRET_KEY", "saut_minio_password"],
+    ["ASSETS_SIGNING_SECRET", "dev-assets-signing-secret"],
+    ["ASSETS_INTERNAL_API_KEY", "dev-assets-internal-key"]
+  ];
+
+  for (const [path, developmentValue] of unsafeSecrets) {
+    if (values[path] === developmentValue) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [path],
+        message: "must be configured with a non-development value in production"
+      });
+    }
+  }
+
+  const unsafeFlags: Array<keyof typeof values> = [
+    "AUTH_DEV_RETURN_CODE",
+    "NOTIFICATION_DEV_MODE",
+    "MIGRATION_DROP_LEGACY_DATABASES"
+  ];
+  for (const path of unsafeFlags) {
+    if (values[path] === true) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [path],
+        message: "must be disabled in production"
+      });
+    }
+  }
+
+  if (values.STRIPE_MODE === "mock") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["STRIPE_MODE"], message: "must be live in production" });
+  }
+  if (values.SKYDROPX_MODE === "mock") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["SKYDROPX_MODE"], message: "must be live in production" });
+  }
 });
 
-const parsed = schema.parse(process.env);
+export function parseConfig(environment: NodeJS.ProcessEnv): z.infer<typeof schema> {
+  return schema.parse(environment);
+}
+
+const parsed = parseConfig(process.env);
 
 export const config = {
   ...parsed,
