@@ -150,7 +150,7 @@ let application: Awaited<ReturnType<typeof createApp>>;
 let app: Awaited<ReturnType<typeof createApp>>["app"];
 
 beforeAll(async () => {
-  const fakeContext: any = { pool: {}, redis: { status: "ready" }, s3: {}, stripe: {}, sockets: new Set() };
+  const fakeContext: any = { database: {}, redis: { status: "ready" }, s3: {}, stripe: {}, sockets: new Set() };
   application = await createApp(fakeContext);
   app = application.app;
 });

@@ -10,7 +10,7 @@ import { jwtVerify, SignJWT } from "jose";
 import Stripe from "stripe";
 
 import { config } from "./config.js";
-import { pingDatabase, pool } from "./db.js";
+import { database, pingDatabase } from "./db.js";
 import type { Actor, AppContext } from "./types.js";
 
 export class HttpError extends Error {
@@ -54,11 +54,11 @@ export async function signAccessToken(actor: Omit<Actor, "roles" | "permissions"
 
 export async function accountAccess(accountId: string): Promise<{ roles: string[]; permissions: string[] }> {
   const [roles, permissions] = await Promise.all([
-    pool.query<{ code: string }>(`
+    database.query<{ code: string }>(`
       select r.code from account_roles ar join roles r on r.id = ar.role_id
       where ar.account_id = $1 and (ar.expires_at is null or ar.expires_at > now()) order by r.code
     `, [accountId]),
-    pool.query<{ key: string }>(`
+    database.query<{ key: string }>(`
       with role_grants as (
         select distinct p.id, p.screen || ':' || p.action as key
         from account_roles ar join role_permissions rp on rp.role_id = ar.role_id
@@ -80,7 +80,7 @@ export async function verifyAccessToken(token: string): Promise<Actor> {
   try {
     const { payload } = await jwtVerify(token, tokenSecret, { algorithms: ["HS256"] });
     if (!payload.sub) throw new Error("missing subject");
-    const account = await pool.query<{ actor_type: string; status: string }>(
+    const account = await database.query<{ actor_type: string; status: string }>(
       "select actor_type, status from accounts where id = $1",
       [payload.sub]
     );
@@ -120,7 +120,7 @@ export function requirePermission(actor: Actor, permission?: string): void {
 }
 
 export async function audit(request: FastifyRequest, action: string, resourceType: string, resourceId?: string, payload?: unknown): Promise<void> {
-  await pool.query(`
+  await database.query(`
     insert into audit_log (id, account_id, actor_type, action, resource_type, resource_id, payload, ip, user_agent)
     values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
   `, [randomUUID(), request.actor?.accountId ?? null, request.actor?.actorType ?? "system", action, resourceType,
@@ -155,7 +155,7 @@ export async function createContext(): Promise<AppContext> {
     await s3.send(new CreateBucketCommand({ Bucket: config.S3_BUCKET }));
   }
   const stripe = new Stripe(config.STRIPE_SECRET_KEY);
-  return { pool, redis, s3, stripe, sockets: new Set() };
+  return { database, redis, s3, stripe, sockets: new Set() };
 }
 
 async function globalRateLimit(request: FastifyRequest): Promise<void> {
