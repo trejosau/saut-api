@@ -13,6 +13,7 @@
     "test:unit": "vitest run",
     "test:coverage": "vitest run --coverage",
     "e2e": "node tests/e2e-stack.mjs",
+    "test:e2e": "node tests/e2e-stack.mjs",
     "bootstrap": "tsx src/bootstrap.ts",
     "prisma:deploy": "prisma migrate deploy",
     "prisma:generate": "prisma generate",
