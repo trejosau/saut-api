@@ -77,7 +77,8 @@ const schema = z.object({
   PRICING_DEFAULT_CUSTOMIZER_BASE_PRICE_MXN: z.coerce.number().int().nonnegative().default(499),
   PRICING_DEFAULT_CUSTOMIZER_PER_IMAGE_PRICE_MXN: z.coerce.number().int().nonnegative().default(50),
   MIGRATION_BACKUP_DIR: z.string().default("./backups"),
-  MIGRATION_DROP_LEGACY_DATABASES: booleanValue.default("true")
+  MIGRATION_IMPORT_LEGACY_DATABASES: booleanValue.default("false"),
+  MIGRATION_DROP_LEGACY_DATABASES: booleanValue.default("false")
 }).superRefine((values, context) => {
   if (values.NODE_ENV !== "production") return;
 
