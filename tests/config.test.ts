@@ -1,0 +1,32 @@
+import { describe, expect, it } from "vitest";
+
+import { parseConfig } from "../src/config.js";
+
+const productionEnvironment = {
+  NODE_ENV: "production",
+  AUTH_CODE_SECRET: "production-code-secret",
+  AUTH_TOKEN_SECRET: "production-token-secret",
+  AUTH_INTERNAL_API_KEY: "production-internal-key",
+  S3_SECRET_KEY: "production-s3-secret",
+  ASSETS_SIGNING_SECRET: "production-signing-secret",
+  ASSETS_INTERNAL_API_KEY: "production-assets-key",
+  AUTH_DEV_RETURN_CODE: "false",
+  NOTIFICATION_DEV_MODE: "false",
+  MIGRATION_DROP_LEGACY_DATABASES: "false",
+  STRIPE_MODE: "live",
+  SKYDROPX_MODE: "live"
+} satisfies NodeJS.ProcessEnv;
+
+describe("parseConfig", () => {
+  it("keeps development defaults available outside production", () => {
+    expect(parseConfig({ NODE_ENV: "test" }).AUTH_DEV_RETURN_CODE).toBe(true);
+  });
+
+  it("accepts explicit production-safe values", () => {
+    expect(parseConfig(productionEnvironment).NODE_ENV).toBe("production");
+  });
+
+  it("rejects development defaults in production", () => {
+    expect(() => parseConfig({ NODE_ENV: "production" })).toThrowError();
+  });
+});
