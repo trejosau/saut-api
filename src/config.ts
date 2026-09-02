@@ -26,6 +26,7 @@ const schema = z.object({
   AUTH_CODE_MIN_RESEND_SEC: z.coerce.number().int().nonnegative().default(30),
   AUTH_SESSION_TTL_SEC: z.coerce.number().int().positive().default(2592000),
   AUTH_ACCESS_TTL_SEC: z.coerce.number().int().positive().default(900),
+  ANALYTICS_WS_TICKET_TTL_SEC: z.coerce.number().int().positive().default(60),
   AUTH_DEV_RETURN_CODE: booleanValue.default(true),
   AUTH_AUTO_CREATE: booleanValue.default(true),
   AUTH_ADMIN_EMAILS: z.string().default("albertosaut@gmail.com"),

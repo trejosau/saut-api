@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 
 import { config } from "../config.js";
-import { asObject, audit, bearerToken, HttpError, pagination, verifyAccessToken } from "../platform.js";
+import { authorizeOrderAccess } from "./commerce.js";
+import { asObject, audit, authenticate, bearerToken, HttpError, normalizeEmail, pagination, randomToken, requirePermission, verifyAccessToken } from "../platform.js";
 import type { AppContext } from "../types.js";
 
 const reasons = [
@@ -19,6 +20,40 @@ async function optionalActor(request: FastifyRequest): Promise<any | null> {
   const token = bearerToken(request);
   if (!token) return null;
   try { return await verifyAccessToken(token); } catch { return null; }
+}
+
+function orderCode(id: string): string {
+  return id.replaceAll("-", "").slice(0, 8).toUpperCase();
+}
+
+function normalizedOrderCode(value: unknown): string {
+  return String(value ?? "").replaceAll("-", "").toUpperCase();
+}
+
+async function accountEmail(context: AppContext, accountId: string): Promise<string> {
+  const result = await context.database.query<{ primary_email: string | null }>(
+    "select primary_email from accounts where id=$1",
+    [accountId]
+  );
+  const email = normalizeEmail(String(result.rows[0]?.primary_email ?? ""));
+  if (!email) throw new HttpError(403, "La cuenta no tiene correo asociado");
+  return email;
+}
+
+async function authorizeAnalyticsRead(request: FastifyRequest): Promise<void> {
+  const actor = await authenticate(request);
+  requirePermission(actor, "analytics:read");
+}
+
+async function authorizeAnalyticsSocket(context: AppContext, request: FastifyRequest): Promise<void> {
+  const query = asObject(request.query);
+  const ticket = typeof query.ticket === "string" ? query.ticket.trim() : "";
+  if (!ticket) throw new HttpError(401, "Se requiere un ticket realtime");
+  const token = await context.redis.getdel(`analytics:ws:${ticket}`);
+  if (!token) throw new HttpError(401, "Ticket realtime inválido o expirado");
+  const actor = await verifyAccessToken(token);
+  requirePermission(actor, "analytics:read");
+  request.actor = actor;
 }
 
 async function caseDetail(context: AppContext, id: string): Promise<any> {
@@ -46,12 +81,66 @@ async function kpis(context:AppContext,query:Record<string,any>):Promise<any>{co
   context.database.query("select coalesce(provider,'unknown')provider,count(*)filter(where status='delivered')::int delivered_orders,count(*)filter(where status='failed')::int failed_orders,count(*)filter(where failed_attempts>0)::int incidents from shipments where created_at between $1 and $2 group by provider",[from,to])
 ]);const s=sales.rows[0]??{};const c=customizer.rows[0]??{};const abandonment=Number(c.started??0)>0?Number(c.abandoned??0)/Number(c.started)*100:0;return{from,to,sales:s,lead_times_minutes:{paid_to_designed_avg:null,designed_to_shipped_avg:null,paid_to_delivered_avg:null},incidents:{...(incidents.rows[0]??{}),by_reason:reasonsRows.rows},merma:merma.rows[0]??{events:0,units:0},customizer:{...c,abandonment_rate_pct:Number(abandonment.toFixed(2)),paid_items:Number(s.items_sold??0)},top_designs:top.rows,shipping_performance:shipping.rows.map(row=>({...row,avg_delivery_minutes:null})),margins:{gross_revenue_mxn:Number(s.revenue_mxn??0),estimated_cost_mxn:null,gross_margin_mxn:null,gross_margin_pct:null,coverage_orders:0}};}
 
+async function createSupportCase(context: AppContext, request: FastifyRequest, reply: any): Promise<any> {
+  const body = asObject(request.body);
+  const actor = await optionalActor(request);
+  const email = actor
+    ? await accountEmail(context, actor.accountId)
+    : normalizeEmail(String(body.contact_email ?? body.guest_email ?? ""));
+  if (!email) throw new HttpError(400, "contact_email requerido");
+
+  let order: any = null;
+  if (body.order_id) {
+    order = (await context.database.query("select * from orders where id=$1", [body.order_id])).rows[0];
+    if (!order) throw new HttpError(404, "Pedido no encontrado");
+  } else if (body.guest_order_code) {
+    const all = (await context.database.query(
+      "select * from orders where lower(customer_email)=$1",
+      [normalizeEmail(String(body.guest_email ?? email))]
+    )).rows;
+    order = all.find((row) => orderCode(String(row.id)) === normalizedOrderCode(body.guest_order_code));
+  }
+
+  if (order) {
+    if (actor) {
+      await authorizeOrderAccess(context, request, order);
+    } else if (
+      email !== normalizeEmail(String(order.customer_email ?? "")) ||
+      normalizedOrderCode(body.guest_order_code) !== orderCode(String(order.id))
+    ) {
+      throw new HttpError(403, "No tienes acceso a este pedido");
+    }
+  }
+
+  const id = randomUUID();
+  await context.database.query(`insert into support_cases(id,status,reason,priority,subject,customer_type,account_id,contact_email,contact_phone,guest_email,guest_order_code,linked_order_id,linked_order_code,is_order_related,metadata,created_by)
+    values($1,'open',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, [
+    id, body.reason, body.priority ?? null, body.subject ?? null, actor ? "account" : "guest",
+    actor?.accountId ?? null, email, body.contact_phone ?? null, actor ? null : email,
+    body.guest_order_code ?? null, order?.id ?? null,
+    order ? orderCode(String(order.id)) : body.guest_order_code ?? null,
+    Boolean(body.is_about_order || order), body.metadata ?? null, actor?.accountId ?? email
+  ]);
+  if (order) await context.database.query(
+    "insert into support_case_order_links(id,case_id,order_id,order_code,link_method,created_by)values($1,$2,$3,$4,$5,$6)on conflict(case_id,order_id)do nothing",
+    [randomUUID(), id, order.id, orderCode(String(order.id)), body.order_id ? "id" : "guest_code", actor?.accountId ?? email]
+  );
+  await addMessage(context, id, { message: body.message, attachments: body.attachments }, {
+    type: actor ? "customer" : "guest", accountId: actor?.accountId, label: email
+  });
+  await context.database.query(
+    "insert into analytics_events(id,event_ref,event_type,support_case_id,status,occurred_at)values($1,$2,'support_case_created',$3,'open',now())on conflict(event_ref)do nothing",
+    [randomUUID(), `support:${id}:created`, id]
+  );
+  reply.status(201);
+  return caseDetail(context, id);
+}
+
 export async function registerSupportAnalytics(app:FastifyInstance,context:AppContext):Promise<void>{
   app.get("/support/chat/reasons",async()=>({reasons}));
   const listCases=async(request:any,admin=false)=>{const query=asObject(request.query);const{limit,offset}=pagination(query);const values:any[]=[];const where:string[]=[];if(admin){for(const key of ["status","reason","linked_order_id","contact_email"])if(query[key]){values.push(query[key]);where.push(`${key}=$${values.length}`);}}else{const actor=await optionalActor(request);if(actor){values.push(actor.accountId);where.push(`account_id=$${values.length}`);}else{if(!query.guest_email||!query.guest_order_code)throw new HttpError(400,"Identidad de invitado requerida");values.push(String(query.guest_email).toLowerCase(),String(query.guest_order_code));where.push(`lower(guest_email)=$${values.length-1} and guest_order_code=$${values.length}`);}}values.push(limit,offset);const total=Number((await context.database.query(`select count(*) from support_cases ${where.length?`where ${where.join(" and ")}`:""}`,values.slice(0,-2))).rows[0]?.count??0);const items=(await context.database.query(`select * from support_cases ${where.length?`where ${where.join(" and ")}`:""} order by updated_at desc limit $${values.length-1} offset $${values.length}`,values)).rows;return{items,total,limit,offset};};
   app.get("/support/cases",async request=>listCases(request));
-  app.post("/support/cases",async(request,reply)=>{const body=asObject(request.body);const actor=await optionalActor(request);const email=String(body.contact_email??body.guest_email??"").toLowerCase();if(!email)throw new HttpError(400,"contact_email requerido");let order:any=null;if(body.order_id)order=(await context.database.query("select * from orders where id=$1",[body.order_id])).rows[0];else if(body.guest_order_code){const all=(await context.database.query("select * from orders where lower(customer_email)=$1",[String(body.guest_email??email).toLowerCase()])).rows;order=all.find(row=>row.id.replaceAll("-","").slice(0,8).toUpperCase()===String(body.guest_order_code).replaceAll("-","").toUpperCase());}const id=randomUUID();await context.database.query(`insert into support_cases(id,status,reason,priority,subject,customer_type,account_id,contact_email,contact_phone,guest_email,guest_order_code,linked_order_id,linked_order_code,is_order_related,metadata,created_by)
-    values($1,'open',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,[id,body.reason,body.priority??null,body.subject??null,actor?"account":"guest",actor?.accountId??null,email,body.contact_phone??null,actor?null:email,body.guest_order_code??null,order?.id??null,order?order.id.replaceAll("-","").slice(0,8).toUpperCase():body.guest_order_code??null,Boolean(body.is_about_order||order),body.metadata??null,actor?.accountId??email]);if(order)await context.database.query("insert into support_case_order_links(id,case_id,order_id,order_code,link_method,created_by)values($1,$2,$3,$4,$5,$6)on conflict(case_id,order_id)do nothing",[randomUUID(),id,order.id,order.id.replaceAll("-","").slice(0,8).toUpperCase(),body.order_id?"id":"guest_code",actor?.accountId??email]);await addMessage(context,id,{message:body.message,attachments:body.attachments},{type:actor?"customer":"guest",accountId:actor?.accountId,label:email});await context.database.query("insert into analytics_events(id,event_ref,event_type,support_case_id,status,occurred_at)values($1,$2,'support_case_created',$3,'open',now())on conflict(event_ref)do nothing",[randomUUID(),`support:${id}:created`,id]);reply.status(201);return caseDetail(context,id);});
+  app.post("/support/cases",async(request,reply)=>createSupportCase(context,request,reply));
   app.get<{Params:{case_id:string}}>("/support/cases/:case_id",async(request)=>{const detail=await caseDetail(context,request.params.case_id);await ensureCaseAccess(context,request,detail.case);return detail;});
   app.post<{Params:{case_id:string}}>("/support/cases/:case_id/messages",async(request)=>{const detail=await caseDetail(context,request.params.case_id);await ensureCaseAccess(context,request,detail.case);const actor=await optionalActor(request);return addMessage(context,request.params.case_id,asObject(request.body),{type:actor?"customer":"guest",accountId:actor?.accountId,label:detail.case.contact_email});});
   app.get("/admin/support/cases",async request=>listCases(request,true));app.get<{Params:{case_id:string}}>("/admin/support/cases/:case_id",async request=>caseDetail(context,request.params.case_id));
@@ -69,9 +158,10 @@ export async function registerSupportAnalytics(app:FastifyInstance,context:AppCo
   app.post("/internal/analytics/events",async(request,reply)=>{const body=asObject(request.body);const id=randomUUID();await context.database.query("insert into analytics_events(id,event_ref,event_type,order_id,payment_attempt_id,support_case_id,work_order_id,status,amount_mxn,occurred_at,payload)values($1,$2,$3,$4,$5,$6,$7,$8,$9,coalesce($10,now()),$11)on conflict(event_ref)do nothing",[id,body.event_ref??null,body.event_type,body.order_id??null,body.payment_attempt_id??null,body.support_case_id??null,body.work_order_id??null,body.status??null,body.amount_mxn??null,body.occurred_at??null,body.payload??body]);reply.status(202);return{accepted:true,event_id:id};});
   app.post("/internal/analytics/sales/confirmed",async(request,reply)=>{const body=asObject(request.body);const id=randomUUID();await context.database.query("insert into sales_pings(id,event_ref,order_id,payment_attempt_id,quantity,amount_mxn,shipping_method,occurred_at,payload)values($1,$2,$3,$4,$5,$6,$7,now(),$8)on conflict(event_ref)do nothing",[id,body.event_ref??`sale:${body.order_id}`,body.order_id,body.payment_attempt_id??null,body.quantity??1,body.amount_mxn??0,body.shipping_method??"unknown",body]);reply.status(202);return{accepted:true,id};});
   app.post("/internal/analytics/customizer/events",async(request,reply)=>{const body=asObject(request.body);const id=randomUUID();await context.database.query("insert into analytics_events(id,event_ref,event_type,publication_id,status,occurred_at,payload)values($1,$2,$3,$4,$5,now(),$6)on conflict(event_ref)do nothing",[id,body.event_ref??null,body.event_type??"customizer_event",body.publication_id??null,body.status??null,body]);reply.status(202);return{accepted:true,event_id:id};});
-  app.get("/analytics/map/pings",async(request)=>{const q=asObject(request.query);const{limit}=pagination(q);return(await context.database.query("select * from sales_pings order by occurred_at desc limit $1",[limit])).rows;});
+  app.post("/internal/analytics/ws-ticket",async(request)=>{const actor=await authenticate(request);requirePermission(actor,"analytics:read");const token=bearerToken(request);if(!token)throw new HttpError(401,"Se requiere autenticación");const ticket=randomToken();await context.redis.set(`analytics:ws:${ticket}`,token,"EX",config.ANALYTICS_WS_TICKET_TTL_SEC);return{ticket,expires_in_sec:config.ANALYTICS_WS_TICKET_TTL_SEC};});
+  app.get("/analytics/map/pings",async(request)=>{await authorizeAnalyticsRead(request);const q=asObject(request.query);const{limit}=pagination(q);return(await context.database.query("select * from sales_pings order by occurred_at desc limit $1",[limit])).rows;});
   app.get("/admin/analytics/kpis",async request=>kpis(context,asObject(request.query)));
-  app.get("/ws/map",{websocket:true},socket=>{context.sockets.add(socket);socket.send(JSON.stringify({type:"connected",channel:"sales-map"}));socket.on("close",()=>context.sockets.delete(socket));});
-  app.get("/ws",{websocket:true},socket=>{context.sockets.add(socket);socket.send(JSON.stringify({type:"connected",channel:"realtime"}));socket.on("close",()=>context.sockets.delete(socket));});
+  app.get("/ws/map",{websocket:true,preHandler:async(request)=>authorizeAnalyticsSocket(context,request)},socket=>{context.sockets.add(socket);socket.send(JSON.stringify({type:"connected",channel:"sales-map"}));socket.on("close",()=>context.sockets.delete(socket));});
+  app.get("/ws",{websocket:true,preHandler:async(request)=>authorizeAnalyticsSocket(context,request)},socket=>{context.sockets.add(socket);socket.send(JSON.stringify({type:"connected",channel:"realtime"}));socket.on("close",()=>context.sockets.delete(socket));});
   app.post("/internal/broadcast",async(request)=>{const payload=JSON.stringify(asObject(request.body));let delivered=0;for(const socket of context.sockets)if(socket.readyState===1){socket.send(payload);delivered++;}return{delivered};});
 }

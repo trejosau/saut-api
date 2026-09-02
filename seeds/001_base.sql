@@ -12,7 +12,10 @@ INSERT INTO permissions (screen, action, description) VALUES
   ('orders', 'read', 'Consultar pedidos'), ('orders', 'write', 'Administrar pedidos'),
   ('shipping', 'read', 'Consultar envíos'), ('shipping', 'write', 'Administrar envíos'),
   ('support', 'read', 'Consultar soporte'), ('support', 'write', 'Administrar soporte'),
-  ('analytics', 'read', 'Consultar analítica'), ('auth', 'rbac_manage', 'Administrar acceso'),
+  ('analytics', 'read', 'Consultar analítica'), ('assets', 'read', 'Consultar assets internos'),
+  ('assets', 'write', 'Administrar assets internos'), ('pricing', 'read', 'Consultar configuración de precios'),
+  ('pricing', 'write', 'Administrar configuración de precios'), ('notifications', 'read', 'Consultar notificaciones'),
+  ('notifications', 'write', 'Reintentar notificaciones'), ('auth', 'rbac_manage', 'Administrar acceso'),
   ('auth', 'audit_read', 'Consultar auditoría'), ('payments', 'refund', 'Emitir reembolsos')
 ON CONFLICT (screen, action) DO UPDATE SET description = excluded.description;
 

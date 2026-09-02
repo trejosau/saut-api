@@ -18,6 +18,7 @@ const variantColumns = ["id", "design_id", "code", "label", "dtf_asset_id", "pub
 const collectionColumns = ["id", "slug", "title", "description", "visibility", "cover_asset_id", "informative_image_id"] as const;
 const dropColumns = ["id", "slug", "title", "description", "status", "starts_at", "ends_at", "capacity_total", "visibility", "cover_asset_id", "informative_image_id"] as const;
 const informativeColumns = ["id", "scope_type", "scope_id", "asset_id"] as const;
+const mockupColumns = ["variant_id", "garment_color", "view_side", "mockup_asset_id", "mockup_url"] as const;
 
 function urlForAsset(id: string | null | undefined): string | null {
   return id ? `/assets/${id}/download` : null;
@@ -45,22 +46,37 @@ const publicationSelect = `
   left join informative_images ii on ii.id=p.informative_image_id
 `;
 
-async function publicationBy(context: AppContext, column: "id" | "slug", value: string): Promise<any> {
-  const result = await context.database.query(`${publicationSelect} where p.${column}=$1`, [value]);
+async function publicationBy(context: AppContext, column: "id" | "slug", value: string, publicOnly = false): Promise<any> {
+  const visibility = publicOnly ? " and p.is_active=true and p.visibility in ('public','visible')" : "";
+  const result = await context.database.query(`${publicationSelect} where p.${column}=$1${visibility}`, [value]);
   if (!result.rows[0]) throw new HttpError(404, "Publicación no encontrada");
   return decoratePublication(result.rows[0]);
 }
 
-async function publicationDetail(context: AppContext, column: "id" | "slug", value: string): Promise<any> {
-  const publication = await publicationBy(context, column, value);
+async function publicationDetail(context: AppContext, column: "id" | "slug", value: string, publicOnly = false): Promise<any> {
+  const publication = await publicationBy(context, column, value, publicOnly);
   const [design, variants, mockups] = await Promise.all([
     context.database.query("select * from designs where id=$1", [publication.design_id]),
     context.database.query(`select v.*, ${"'"}/assets/${"'"} || v.dtf_asset_id || '/download' as dtf_asset_url,
       case when v.public_preview_asset_id is null then null else '/assets/' || v.public_preview_asset_id || '/download' end as public_preview_url
-      from design_variants v where design_id=$1 order by sort_rank,id`, [publication.design_id]),
+      from design_variants v where design_id=$1${publicOnly ? " and is_active=true" : ""} order by sort_rank,id`, [publication.design_id]),
     context.database.query("select * from publication_mockups where publication_id=$1 order by created_at", [publication.id])
   ]);
   return { publication, design: design.rows[0], variants: variants.rows, mockups: mockups.rows.map((row) => ({ ...row, mockup_url: row.mockup_url ?? urlForAsset(row.mockup_asset_id) })) };
+}
+
+async function patchPublicationMockup(context: AppContext, publicationId: string, mockupId: string, input: Record<string, any>): Promise<any> {
+  const keys = mockupColumns.filter((key) => input[key] !== undefined);
+  if (keys.length === 0) throw new HttpError(400, "Payload vacío");
+  const values = keys.map((key) => input[key]);
+  values.push(mockupId, publicationId);
+  const row = (await context.database.query(
+    `update publication_mockups set ${keys.map((key, index) => `${key}=$${index + 1}`).join(",")}
+      where id=$${values.length - 1} and publication_id=$${values.length} returning *`,
+    values
+  )).rows[0];
+  if (!row) throw new HttpError(404, "Registro no encontrado");
+  return row;
 }
 
 function normalizeVisibility(value: unknown): unknown {
@@ -94,26 +110,27 @@ export async function registerCatalog(app: FastifyInstance, context: AppContext)
     }
     return result;
   });
-  app.get<{ Params: { slug: string } }>("/catalog/publications/:slug", async (request) => publicationDetail(context, "slug", request.params.slug));
-  app.get("/catalog/collections", async (request) => {
-    const query = asObject(request.query); const visible = query.visible === "true"; const rows = (await context.database.query(`select c.*,case when c.cover_asset_id is null then null else '/assets/'||c.cover_asset_id||'/download' end cover_url,
+  app.get<{ Params: { slug: string } }>("/catalog/publications/:slug", async (request) => publicationDetail(context, "slug", request.params.slug, true));
+  app.get("/catalog/collections", async () => {
+    const rows = (await context.database.query(`select c.*,case when c.cover_asset_id is null then null else '/assets/'||c.cover_asset_id||'/download' end cover_url,
       case when ii.asset_id is null then null else '/assets/'||ii.asset_id||'/download' end informative_image_url
-      from collections_sets c left join informative_images ii on ii.id=c.informative_image_id ${visible ? "where c.visibility in ('public','visible')" : ""} order by c.created_at desc`)).rows; return rows;
+      from collections_sets c left join informative_images ii on ii.id=c.informative_image_id where c.visibility in ('public','visible') order by c.created_at desc`)).rows; return rows;
   });
   app.get<{ Params: { slug: string } }>("/catalog/collections/:slug", async (request) => {
-    const collection = (await context.database.query("select * from collections_sets where slug=$1", [request.params.slug])).rows[0];
+    const collection = (await context.database.query("select * from collections_sets where slug=$1 and visibility in ('public','visible')", [request.params.slug])).rows[0];
     if (!collection) throw new HttpError(404, "Colección no encontrada");
-    const items = (await context.database.query(`${publicationSelect} join collection_set_items ci on ci.publication_id=p.id where ci.collection_id=$1 order by ci.position_index`, [collection.id])).rows.map(decoratePublication);
+    const items = (await context.database.query(`${publicationSelect} join collection_set_items ci on ci.publication_id=p.id where ci.collection_id=$1 and p.is_active=true and p.visibility in ('public','visible') order by ci.position_index`, [collection.id])).rows.map(decoratePublication);
     return { collection: { ...collection, cover_url: urlForAsset(collection.cover_asset_id), informative_image_url: null }, items };
   });
   app.get("/catalog/drops", async (request) => {
     const query = asObject(request.query); const values: any[]=[]; const where:string[]=[];
-    if(query.status){values.push(query.status);where.push(`status=$${values.length}`);} if(query.visible==="true")where.push("visibility in ('public','visible')");
+    where.push("visibility in ('public','visible')");
+    if(query.status){values.push(query.status);where.push(`status=$${values.length}`);}
     return (await context.database.query(`select *,case when cover_asset_id is null then null else '/assets/'||cover_asset_id||'/download' end cover_url from drops ${where.length?`where ${where.join(" and ")}`:""} order by created_at desc`,values)).rows;
   });
   app.get<{ Params: { slug: string } }>("/catalog/drops/:slug", async (request) => {
-    const drop=(await context.database.query("select * from drops where slug=$1",[request.params.slug])).rows[0]; if(!drop)throw new HttpError(404,"Drop no encontrado");
-    const items=(await context.database.query(`${publicationSelect} join drop_items di on di.publication_id=p.id where di.drop_id=$1 order by di.position_index`,[drop.id])).rows.map(decoratePublication);
+    const drop=(await context.database.query("select * from drops where slug=$1 and visibility in ('public','visible')",[request.params.slug])).rows[0]; if(!drop)throw new HttpError(404,"Drop no encontrado");
+    const items=(await context.database.query(`${publicationSelect} join drop_items di on di.publication_id=p.id where di.drop_id=$1 and p.is_active=true and p.visibility in ('public','visible') order by di.position_index`,[drop.id])).rows.map(decoratePublication);
     return {drop:{...drop,cover_url:urlForAsset(drop.cover_asset_id),informative_image_url:null},items};
   });
   app.get("/catalog/season", async () => (await context.database.query("select is_enabled,updated_at from season_config where id=1")).rows[0] ?? { is_enabled:false });
@@ -136,8 +153,8 @@ export async function registerCatalog(app: FastifyInstance, context: AppContext)
   app.post<{Params:{id:string}}>("/admin/catalog/publications/:id/unpublish",async(request)=>{const row=(await context.database.query("update publications set is_active=false,visibility='hidden',updated_at=now() where id=$1 returning *",[request.params.id])).rows[0];if(!row)throw new HttpError(404,"Publicación no encontrada");await audit(request,"catalog.publication_unpublished","publication",request.params.id);return decoratePublication(row);});
   app.get<{Params:{id:string}}>("/admin/catalog/publications/:id/mockups",async(request)=>(await context.database.query("select * from publication_mockups where publication_id=$1 order by created_at",[request.params.id])).rows);
   app.post<{Params:{id:string}}>("/admin/catalog/publications/:id/mockups",async(request,reply)=>{const row=await insertRow<any>(context.database,"publication_mockups",{...asObject(request.body),id:randomUUID(),publication_id:request.params.id},["id","publication_id","variant_id","garment_color","view_side","mockup_asset_id","mockup_url"],{view_side:"front"});reply.status(201);return row;});
-  app.patch<{Params:{id:string;mockup_id:string}}>("/admin/catalog/publications/:id/mockups/:mockup_id",async(request)=>patchRow(context.database,"publication_mockups",request.params.mockup_id,asObject(request.body),["variant_id","garment_color","view_side","mockup_asset_id","mockup_url"],false));
-  app.delete<{Params:{id:string;mockup_id:string}}>("/admin/catalog/publications/:id/mockups/:mockup_id",async(request,reply)=>{await deleteRow(context.database,"publication_mockups",request.params.mockup_id);reply.status(204).send();});
+  app.patch<{Params:{id:string;mockup_id:string}}>("/admin/catalog/publications/:id/mockups/:mockup_id",async(request)=>patchPublicationMockup(context,request.params.id,request.params.mockup_id,asObject(request.body)));
+  app.delete<{Params:{id:string;mockup_id:string}}>("/admin/catalog/publications/:id/mockups/:mockup_id",async(request,reply)=>{const result=await context.database.query("delete from publication_mockups where id=$1 and publication_id=$2",[request.params.mockup_id,request.params.id]);if(!result.rowCount)throw new HttpError(404,"Registro no encontrado");reply.status(204).send();});
 
   const registerCrud=(base:string,table:string,columns:readonly string[],search:string,filters:string[]=[],touchUpdatedAt=true)=>{
     app.get(base,async(request)=>listGeneric(context,table,asObject(request.query),search,filters));

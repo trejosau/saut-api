@@ -28,8 +28,21 @@ async function expectStatus(method, path, expectedStatus, body, extraHeaders) {
   }
 }
 
-async function verifySalesMapSocket() {
-  const socketUrl = `${base.replace(/^http/, "ws")}/ws/map`;
+async function issueAnalyticsTicket() {
+  const email = (process.env.AUTH_ADMIN_EMAILS ?? "albertosaut@gmail.com").split(",")[0].trim();
+  const started = await request("POST", "/auth/email/start", { email });
+  if (!started.code) throw new Error("Development login code is unavailable for the realtime smoke test");
+  const session = await request("POST", "/auth/email/verify", { email, code: started.code });
+  const ticket = await request("POST", "/internal/analytics/ws-ticket", undefined, {
+    authorization: `Bearer ${session.access_token}`,
+    "x-internal-api-key": process.env.AUTH_INTERNAL_API_KEY ?? "dev-internal-auth-key"
+  });
+  if (!ticket.ticket) throw new Error("Analytics WebSocket ticket missing");
+  return ticket.ticket;
+}
+
+async function verifySalesMapSocket(ticket) {
+  const socketUrl = `${base.replace(/^http/, "ws")}/ws/map?ticket=${encodeURIComponent(ticket)}`;
   const message = await new Promise((resolve, reject) => {
     const socket = new WebSocket(socketUrl);
     const timeout = setTimeout(() => {
@@ -54,7 +67,7 @@ async function verifySalesMapSocket() {
 }
 
 await request("GET", "/ready");
-await verifySalesMapSocket();
+await verifySalesMapSocket(await issueAnalyticsTicket());
 const publications = await request("GET", "/catalog/publications");
 if (!Array.isArray(publications) || !publications[0]) throw new Error("Catalog seed missing");
 

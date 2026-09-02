@@ -63,6 +63,7 @@ POST /support/cases
 GET /support/cases/{case_id}
 POST /support/cases/{case_id}/messages
 GET /analytics/map/pings
+POST /internal/analytics/ws-ticket
 POST /analytics/customizer/events
 GET /assets/{asset_id}/resolve
 GET /assets/{asset_id}/download
@@ -165,7 +166,7 @@ describe("legacy gateway contract", () => {
   });
 
   it("keeps every method and route", () => {
-    expect(contract).toHaveLength(138);
+    expect(contract).toHaveLength(139);
     for (const route of contract) {
       expect(app.hasRoute(route as any), `${route.method} ${route.url}`).toBe(true);
     }

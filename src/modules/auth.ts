@@ -485,8 +485,10 @@ export async function registerAuth(app: FastifyInstance, context: AppContext): P
     const body = asObject(request.body);
     try {
       const actor = await verifyAccessToken(String(body.token ?? ""));
-      const key = `${body.screen}:${body.action}`;
-      return { allowed: actor.roles.includes("admin") || actor.permissions.includes(key), account_id: actor.accountId,
+      const screen = typeof body.screen === "string" ? body.screen.trim() : "";
+      const action = typeof body.action === "string" ? body.action.trim() : "";
+      const key = screen && action ? `${screen}:${action}` : "";
+      return { allowed: Boolean(key && actor.permissions.includes(key)), account_id: actor.accountId,
         session_id: actor.sessionId ?? null, actor_type: actor.actorType, roles: actor.roles, permissions: actor.permissions };
     } catch {
       return { allowed: false, account_id: null, session_id: null, actor_type: null, roles: [], permissions: [] };

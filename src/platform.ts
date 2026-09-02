@@ -206,7 +206,6 @@ export async function authenticate(request: FastifyRequest): Promise<Actor> {
 }
 
 export function requirePermission(actor: Actor, permission?: string): void {
-  if (actor.roles.includes("admin")) return;
   if (permission && actor.permissions.includes(permission)) return;
   throw new HttpError(403, "Permiso insuficiente");
 }
@@ -262,14 +261,21 @@ async function globalRateLimit(request: FastifyRequest): Promise<void> {
   }
 }
 
-function permissionForPath(path: string, method: string): string | undefined {
-  const action = method === "GET" ? "read" : "write";
-  if (path.includes("/auth/")) return method === "GET" ? "auth:audit_read" : "auth:rbac_manage";
+export function permissionForPath(path: string, method: string): string | undefined {
+  const normalizedPath = path.split("?", 1)[0] ?? path;
+  const action = method === "GET" || method === "HEAD" ? "read" : "write";
+  if (normalizedPath === "/admin/auth/audit-log" || normalizedPath.startsWith("/admin/auth/audit-log/")) return "auth:audit_read";
+  if (normalizedPath.startsWith("/admin/auth/")) return "auth:rbac_manage";
+  if (normalizedPath.startsWith("/admin/assets/sign-upload")) return "assets:write";
+  if (normalizedPath.startsWith("/admin/assets/")) return "assets:read";
+  if (normalizedPath.startsWith("/admin/pricing/quote-order")) return "pricing:read";
+  if (normalizedPath.startsWith("/admin/pricing/")) return `pricing:${action}`;
+  if (normalizedPath.startsWith("/admin/notifications/")) return `notifications:${action}`;
+  if (normalizedPath.startsWith("/admin/support/cases/") && normalizedPath.endsWith("/refunds")) return "payments:refund";
   for (const module of ["catalog", "inventory", "orders", "shipping", "support"] as const) {
-    if (path.includes(`/${module}`) || (module === "orders" && path.includes("/work-orders"))) return `${module}:${action}`;
+    if (normalizedPath.includes(`/${module}`) || (module === "orders" && normalizedPath.includes("/work-orders"))) return `${module}:${action}`;
   }
-  if (path.includes("/analytics")) return "analytics:read";
-  if (path.includes("/notifications")) return "support:read";
+  if (normalizedPath.includes("/analytics")) return "analytics:read";
   return undefined;
 }
 
