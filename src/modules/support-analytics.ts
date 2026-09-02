@@ -146,7 +146,59 @@ export async function registerSupportAnalytics(app:FastifyInstance,context:AppCo
   app.get("/admin/support/cases",async request=>listCases(request,true));app.get<{Params:{case_id:string}}>("/admin/support/cases/:case_id",async request=>caseDetail(context,request.params.case_id));
   app.patch<{Params:{case_id:string}}>("/admin/support/cases/:case_id/status",async(request)=>{const body=asObject(request.body);const row=(await context.database.query("update support_cases set status=$2,closed_at=case when $2 in('resolved','closed')then now()else null end,updated_at=now()where id=$1 returning *",[request.params.case_id,body.status])).rows[0];if(!row)throw new HttpError(404,"Caso no encontrado");if(body.note)await addMessage(context,row.id,{message:body.note},{type:"agent",accountId:request.actor?.accountId,label:"Soporte"},true);if(body.notify_customer)await queueNotification(context,"support_case_update",row.contact_email,{subject:"Actualización de soporte",message:`Tu caso cambió a ${body.status}`,case_id:row.id});await audit(request,"support.status_updated","support_case",row.id,body);return caseDetail(context,row.id);});
   app.post<{Params:{case_id:string}}>("/admin/support/cases/:case_id/messages",async(request)=>{const result=await addMessage(context,request.params.case_id,asObject(request.body),{type:"agent",accountId:request.actor?.accountId,label:"Soporte"},Boolean(asObject(request.body).is_internal));await audit(request,"support.message_added","support_case",request.params.case_id);return result;});
-  app.post<{Params:{case_id:string}}>("/admin/support/cases/:case_id/refunds",async(request)=>{const body=asObject(request.body);const support=(await context.database.query("select * from support_cases where id=$1",[request.params.case_id])).rows[0];if(!support)throw new HttpError(404,"Caso no encontrado");const transaction=support.linked_order_id?(await context.database.query("select pt.* from orders o join payment_transactions pt on pt.payment_attempt_id=o.payment_attempt_id where o.id=$1 order by pt.created_at desc limit 1",[support.linked_order_id])).rows[0]:null;const autoAllowed=Boolean(transaction&&body.mode==="auto");let recorded=false;if(transaction){const amount=Math.min(Number(body.amount_mxn??transaction.amount_mxn),Number(transaction.amount_mxn)-Number(transaction.refunded_amount_mxn));if(amount<=0)throw new HttpError(409,"No queda importe reembolsable");let providerRefundId:null|string=null;if(autoAllowed&&config.STRIPE_MODE==="live"&&transaction.provider_charge_id){const refund=await context.stripe.refunds.create({payment_intent:transaction.provider_charge_id,amount:amount*100,reason:"requested_by_customer"});providerRefundId=refund.id;}await context.database.query("insert into refunds(id,payment_transaction_id,reason,amount_mxn,status,provider_refund_id)values($1,$2,$3,$4,$5,$6)",[randomUUID(),transaction.id,body.reason_code,amount,autoAllowed?"succeeded":"pending_manual",providerRefundId]);if(autoAllowed)await context.database.query("update payment_transactions set refunded_amount_mxn=refunded_amount_mxn+$2,updated_at=now()where id=$1",[transaction.id,amount]);recorded=true;}await audit(request,"support.refund_recorded","support_case",support.id,body);return{case_id:support.id,mode:body.mode,reason_code:body.reason_code,auto_allowed:autoAllowed,recorded};});
+  app.post<{Params:{case_id:string}}>("/admin/support/cases/:case_id/refunds",async(request)=>{
+    const body=asObject(request.body);
+    const support=(await context.database.query("select * from support_cases where id=$1",[request.params.case_id])).rows[0];
+    if(!support)throw new HttpError(404,"Caso no encontrado");
+    let autoAllowed=false;
+    let recorded=false;
+    let refundId:string|null=null;
+    let transactionId:string|null=null;
+    let refundAmount=0;
+    let providerChargeId:string|null=null;
+    if(support.linked_order_id){
+      const client=await context.database.connect();
+      try{
+        await client.query("begin");
+        const transaction=(await client.query("select pt.* from orders o join payment_transactions pt on pt.payment_attempt_id=o.payment_attempt_id where o.id=$1 order by pt.created_at desc limit 1 for update",[support.linked_order_id])).rows[0];
+        if(transaction){
+          autoAllowed=body.mode==="auto";
+          const requestedAmount=Number(body.amount_mxn??transaction.amount_mxn);
+          if(!Number.isSafeInteger(requestedAmount)||requestedAmount<=0)throw new HttpError(422,"Importe de reembolso inválido");
+          refundAmount=Math.min(requestedAmount,Number(transaction.amount_mxn)-Number(transaction.refunded_amount_mxn));
+          if(refundAmount<=0)throw new HttpError(409,"No queda importe reembolsable");
+          refundId=randomUUID();
+          transactionId=transaction.id;
+          providerChargeId=transaction.provider_charge_id??null;
+          if(autoAllowed)await client.query("update payment_transactions set refunded_amount_mxn=refunded_amount_mxn+$2,updated_at=now()where id=$1",[transaction.id,refundAmount]);
+          await client.query("insert into refunds(id,payment_transaction_id,reason,amount_mxn,status,provider_refund_id)values($1,$2,$3,$4,$5,$6)",[refundId,transaction.id,body.reason_code,refundAmount,autoAllowed?"processing":"pending_manual",null]);
+          recorded=true;
+        }
+        await client.query("commit");
+      }catch(error){
+        await client.query("rollback");
+        throw error;
+      }finally{
+        client.release();
+      }
+    }
+    if(autoAllowed&&recorded&&refundId&&transactionId){
+      if(config.STRIPE_MODE==="live"&&providerChargeId){
+        try{
+          const refund=await context.stripe.refunds.create({payment_intent:providerChargeId,amount:refundAmount*100,reason:"requested_by_customer"},{idempotencyKey:refundId});
+          await context.database.query("update refunds set status='succeeded',provider_refund_id=$2,updated_at=now()where id=$1",[refundId,refund.id]);
+        }catch(error){
+          await context.database.query("update refunds set status='failed',updated_at=now()where id=$1",[refundId]);
+          await context.database.query("update payment_transactions set refunded_amount_mxn=refunded_amount_mxn-$2,updated_at=now()where id=$1",[transactionId,refundAmount]);
+          throw error;
+        }
+      }else{
+        await context.database.query("update refunds set status='succeeded',updated_at=now()where id=$1",[refundId]);
+      }
+    }
+    await audit(request,"support.refund_recorded","support_case",support.id,body);
+    return{case_id:support.id,mode:body.mode,reason_code:body.reason_code,auto_allowed:autoAllowed,recorded};
+  });
 
   const notificationHandler=(template:string)=>async(request:any)=>{const body=asObject(request.body);const recipient=String(body.email??body.recipient??"");if(!recipient)throw new HttpError(400,"recipient requerido");return queueNotification(context,template,recipient,body,body.channel??"email");};
   app.post("/notifications/email/login-code",notificationHandler("login_code"));app.post("/notifications/email/login-magic-link",notificationHandler("login_magic_link"));app.post("/notifications/email/support-case-update",notificationHandler("support_case_update"));app.post("/notifications/email/order-confirmation",notificationHandler("order_confirmation"));app.post("/notifications/email/order-status-changed",notificationHandler("order_status_changed"));app.post("/notifications/internal/alerts",notificationHandler("internal_alert"));
