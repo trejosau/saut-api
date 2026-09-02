@@ -28,4 +28,9 @@ declare module "fastify" {
   interface FastifyRequest {
     actor?: Actor;
   }
+
+  interface FastifyInstance {
+    /** Shared infrastructure context attached once during server creation. */
+    context: AppContext;
+  }
 }

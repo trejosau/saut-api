@@ -1,10 +1,14 @@
+import "dotenv/config";
+
 import { z } from "zod";
 
 // Centralized runtime configuration.
-const booleanValue = z
-  .string()
-  .optional()
-  .transform((value) => ["1", "true", "yes", "on"].includes((value ?? "").toLowerCase()));
+const booleanValue = z.preprocess(
+  (value) => value === undefined
+    ? undefined
+    : ["1", "true", "yes", "on"].includes(String(value).toLowerCase()),
+  z.boolean().optional()
+);
 
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -22,21 +26,21 @@ const schema = z.object({
   AUTH_CODE_MIN_RESEND_SEC: z.coerce.number().int().nonnegative().default(30),
   AUTH_SESSION_TTL_SEC: z.coerce.number().int().positive().default(2592000),
   AUTH_ACCESS_TTL_SEC: z.coerce.number().int().positive().default(900),
-  AUTH_DEV_RETURN_CODE: booleanValue.default("true"),
-  AUTH_AUTO_CREATE: booleanValue.default("true"),
+  AUTH_DEV_RETURN_CODE: booleanValue.default(true),
+  AUTH_AUTO_CREATE: booleanValue.default(true),
   AUTH_ADMIN_EMAILS: z.string().default("albertosaut@gmail.com"),
   AUTH_DEFAULT_CUSTOMER_ROLE: z.string().default("customer"),
-  AUTH_MAGIC_LINK_BASE_URL: z.string().url().default("http://localhost:4200/auth/verify"),
+  AUTH_MAGIC_LINK_BASE_URL: z.url().default("http://localhost:4200/auth/verify"),
   AUTH_GOOGLE_CLIENT_ID: z.string().default(""),
   AUTH_GOOGLE_CLIENT_SECRET: z.string().default(""),
-  AUTH_GOOGLE_DISCOVERY_URL: z.string().url().default("https://accounts.google.com/.well-known/openid-configuration"),
-  AUTH_GOOGLE_REDIRECT_URI: z.string().url().default("http://localhost:8080/api/auth/google/callback"),
-  AUTH_GOOGLE_FRONTEND_BASE_URL: z.string().url().default("http://localhost:4200"),
+  AUTH_GOOGLE_DISCOVERY_URL: z.url().default("https://accounts.google.com/.well-known/openid-configuration"),
+  AUTH_GOOGLE_REDIRECT_URI: z.url().default("http://localhost:8080/api/auth/google/callback"),
+  AUTH_GOOGLE_FRONTEND_BASE_URL: z.url().default("http://localhost:4200"),
   RATE_LIMIT_GLOBAL_MAX: z.coerce.number().int().positive().default(120),
   RATE_LIMIT_GLOBAL_WINDOW_SEC: z.coerce.number().int().positive().default(1),
-  RATE_LIMIT_FAIL_OPEN: booleanValue.default("true"),
-  S3_ENDPOINT: z.string().url().default("http://localhost:9000"),
-  S3_PUBLIC_ENDPOINT: z.string().url().default("http://localhost:8080"),
+  RATE_LIMIT_FAIL_OPEN: booleanValue.default(true),
+  S3_ENDPOINT: z.url().default("http://localhost:9000"),
+  S3_PUBLIC_ENDPOINT: z.url().default("http://localhost:8080"),
   S3_REGION: z.string().default("us-east-1"),
   S3_BUCKET: z.string().default("saut-assets"),
   S3_ACCESS_KEY: z.string().default("saut_minio"),
@@ -47,7 +51,7 @@ const schema = z.object({
   STRIPE_SECRET_KEY: z.string().default("sk_test_mock"),
   STRIPE_WEBHOOK_SECRET: z.string().default("whsec_mock"),
   SKYDROPX_MODE: z.enum(["mock", "live"]).default("mock"),
-  SKYDROPX_BASE_URL: z.string().url().default("https://pro.skydropx.com"),
+  SKYDROPX_BASE_URL: z.url().default("https://pro.skydropx.com"),
   SKYDROPX_CLIENT_ID: z.string().default(""),
   SKYDROPX_CLIENT_SECRET: z.string().default(""),
   SKYDROPX_GRANT_TYPE: z.string().default("client_credentials"),
@@ -71,14 +75,14 @@ const schema = z.object({
   SENDGRID_FROM_EMAIL: z.string().optional(),
   TWILIO_API_KEY: z.string().optional(),
   TWILIO_FROM_EMAIL: z.string().optional(),
-  NOTIFICATION_DEV_MODE: booleanValue.default("true"),
+  NOTIFICATION_DEV_MODE: booleanValue.default(true),
   LOCAL_SHIPPING_COST_MXN: z.coerce.number().int().nonnegative().default(79),
   NATIONAL_SHIPPING_COST_MXN: z.coerce.number().int().nonnegative().default(149),
   PRICING_DEFAULT_CUSTOMIZER_BASE_PRICE_MXN: z.coerce.number().int().nonnegative().default(499),
   PRICING_DEFAULT_CUSTOMIZER_PER_IMAGE_PRICE_MXN: z.coerce.number().int().nonnegative().default(50),
   MIGRATION_BACKUP_DIR: z.string().default("./backups"),
-  MIGRATION_IMPORT_LEGACY_DATABASES: booleanValue.default("false"),
-  MIGRATION_DROP_LEGACY_DATABASES: booleanValue.default("false")
+  MIGRATION_IMPORT_LEGACY_DATABASES: booleanValue.default(false),
+  MIGRATION_DROP_LEGACY_DATABASES: booleanValue.default(false)
 }).superRefine((values, context) => {
   if (values.NODE_ENV !== "production") return;
 

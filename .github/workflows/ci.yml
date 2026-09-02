@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm install --global npm@12.0.2
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test:coverage
+      - run: npm run prisma:validate
+      - run: npm run build
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18.6-trixie
+        env:
+          POSTGRES_DB: saut
+          POSTGRES_USER: saut
+          POSTGRES_PASSWORD: saut_ci_postgres_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U saut -d saut"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:8.10.1-trixie
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm install --global npm@12.0.2
+      - run: npm ci
+      - run: npm run build
+      - name: Start S3-compatible storage
+        run: |
+          docker run --detach --rm --name saut-ci-minio --network host \
+            --env MINIO_ROOT_USER=saut_minio \
+            --env MINIO_ROOT_PASSWORD=saut_ci_minio_password \
+            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772 \
+            server /data --console-address :9001
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error http://127.0.0.1:9000/minio/health/live; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs saut-ci-minio
+          exit 1
+      - name: Run API and its end-to-end contract
+        env:
+          NODE_ENV: test
+          HOST: 127.0.0.1
+          PORT: 8080
+          DATABASE_URL: postgres://saut:saut_ci_postgres_password@127.0.0.1:5432/saut
+          POSTGRES_ADMIN_URL: postgres://saut:saut_ci_postgres_password@127.0.0.1:5432/postgres
+          REDIS_URL: redis://127.0.0.1:6379/0
+          S3_ENDPOINT: http://127.0.0.1:9000
+          S3_PUBLIC_ENDPOINT: http://127.0.0.1:9000
+          S3_BUCKET: saut-assets
+          S3_ACCESS_KEY: saut_minio
+          S3_SECRET_KEY: saut_ci_minio_password
+          AUTH_CODE_SECRET: saut_ci_auth_code_secret
+          AUTH_TOKEN_SECRET: saut_ci_auth_token_secret
+          AUTH_INTERNAL_API_KEY: saut_ci_internal_api_key
+          ASSETS_SIGNING_SECRET: saut_ci_assets_signing_secret
+          ASSETS_INTERNAL_API_KEY: saut_ci_assets_internal_api_key
+          STRIPE_MODE: mock
+          SKYDROPX_MODE: mock
+          NOTIFICATION_DEV_MODE: "true"
+          API_BASE_URL: http://127.0.0.1:8080
+        run: |
+          set -euo pipefail
+          npm run prisma:deploy
+          npm run bootstrap
+          npm run start > /tmp/saut-api.log 2>&1 &
+          api_pid=$!
+          trap 'kill "$api_pid" || true; docker stop saut-ci-minio || true' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error http://127.0.0.1:8080/ready; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent --show-error http://127.0.0.1:8080/ready
+          npm run e2e

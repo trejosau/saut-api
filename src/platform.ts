@@ -8,15 +8,97 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { Redis } from "ioredis";
 import { jwtVerify, SignJWT } from "jose";
 import Stripe from "stripe";
+import { ZodError } from "zod";
 
 import { config } from "./config.js";
 import { database, pingDatabase } from "./db.js";
 import type { Actor, AppContext } from "./types.js";
 
+export type ApiErrorCode =
+  | "BAD_REQUEST"
+  | "UNAUTHENTICATED"
+  | "FORBIDDEN"
+  | "NOT_FOUND"
+  | "CONFLICT"
+  | "VALIDATION_ERROR"
+  | "RATE_LIMITED"
+  | "TIMEOUT"
+  | "PAYLOAD_TOO_LARGE"
+  | "INTERNAL_ERROR"
+  | "SERVICE_UNAVAILABLE"
+  | "UNKNOWN_ERROR";
+
 export class HttpError extends Error {
-  constructor(public readonly statusCode: number, message: string, public readonly details?: unknown) {
+  readonly code: ApiErrorCode | string;
+
+  constructor(
+    public readonly statusCode: number,
+    message: string,
+    public readonly details?: unknown,
+    code?: ApiErrorCode | string
+  ) {
     super(message);
+    this.name = "HttpError";
+    this.code = code ?? codeForStatus(statusCode);
   }
+}
+
+export type NormalizedApiError = {
+  statusCode: number;
+  code: ApiErrorCode | string;
+  message: string;
+  details?: unknown;
+};
+
+function codeForStatus(status: number): ApiErrorCode {
+  if (status === 400) return "BAD_REQUEST";
+  if (status === 401) return "UNAUTHENTICATED";
+  if (status === 403) return "FORBIDDEN";
+  if (status === 404) return "NOT_FOUND";
+  if (status === 409) return "CONFLICT";
+  if (status === 408) return "TIMEOUT";
+  if (status === 413) return "PAYLOAD_TOO_LARGE";
+  if (status === 422) return "VALIDATION_ERROR";
+  if (status === 429) return "RATE_LIMITED";
+  if (status === 503) return "SERVICE_UNAVAILABLE";
+  if (status >= 500) return "INTERNAL_ERROR";
+  return "UNKNOWN_ERROR";
+}
+
+/** Converts thrown values at the HTTP boundary without changing route contracts. */
+export function normalizeApiError(exception: unknown): NormalizedApiError {
+  if (exception instanceof ZodError) {
+    const fields: Record<string, string[]> = {};
+    for (const issue of exception.issues) {
+      const field = issue.path.length > 0 ? issue.path.join(".") : "_global";
+      (fields[field] ??= []).push(issue.message);
+    }
+    return {
+      statusCode: 422,
+      code: "VALIDATION_ERROR",
+      message: "Revisa los campos enviados.",
+      details: { fields },
+    };
+  }
+  if (exception instanceof HttpError) {
+    return {
+      statusCode: exception.statusCode,
+      code: exception.code,
+      message: exception.message,
+      ...(exception.details === undefined ? {} : { details: exception.details }),
+    };
+  }
+
+  const candidate = exception as { statusCode?: unknown; status?: unknown; message?: unknown; validation?: unknown } | null;
+  const statusCode = Number(candidate?.statusCode ?? candidate?.status ?? 500);
+  const safeStatus = Number.isInteger(statusCode) && statusCode >= 400 && statusCode <= 599 ? statusCode : 500;
+  const details = candidate?.validation;
+  return {
+    statusCode: safeStatus,
+    code: codeForStatus(safeStatus),
+    message: safeStatus >= 500 ? "No se pudo completar la operación." : String(candidate?.message ?? "Solicitud inválida"),
+    ...(details === undefined ? {} : { details }),
+  };
 }
 
 export function normalizeEmail(value: string): string {
@@ -161,8 +243,8 @@ export async function createContext(): Promise<AppContext> {
 async function globalRateLimit(request: FastifyRequest): Promise<void> {
   const key = `rate:global:${request.ip}:${Math.floor(Date.now() / (config.RATE_LIMIT_GLOBAL_WINDOW_SEC * 1000))}`;
   try {
-    const count = await (request.server as any).context.redis.incr(key);
-    if (count === 1) await (request.server as any).context.redis.expire(key, config.RATE_LIMIT_GLOBAL_WINDOW_SEC + 1);
+    const count = await request.server.context.redis.incr(key);
+    if (count === 1) await request.server.context.redis.expire(key, config.RATE_LIMIT_GLOBAL_WINDOW_SEC + 1);
     if (count > config.RATE_LIMIT_GLOBAL_MAX) throw new HttpError(429, "Demasiadas solicitudes");
   } catch (error) {
     if (error instanceof HttpError) throw error;
@@ -183,7 +265,7 @@ function permissionForPath(path: string, method: string): string | undefined {
 
 export async function buildFastifyServer(context: AppContext): Promise<FastifyInstance> {
   const app = Fastify({ logger: true, bodyLimit: 100 * 1024 * 1024, trustProxy: true, requestIdHeader: "x-request-id" });
-  (app as any).context = context;
+  app.context = context;
   await app.register(cors, {
     origin: (origin, callback) => callback(null, !origin || config.corsOrigins.includes(origin)),
     credentials: true

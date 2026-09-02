@@ -1,22 +1,23 @@
 # SAUT API
 
-API HTTP/WebSocket de SAUT construida como monolito modular con NestJS 11 y
+API HTTP/WebSocket de SAUT construida como monolito modular con NestJS 12 y
 Fastify. PostgreSQL se accede mediante Prisma ORM; Redis gestiona rate limiting
 y MinIO/S3 almacena assets.
 
 ## Desarrollo
 
-Requisitos: Node.js 24 y la infraestructura del `compose.yml` del proyecto raíz.
+Requisitos: Node.js 24.20.0 LTS, npm 12.0.2 y la infraestructura de
+`docker/docker-compose.yml` del workspace.
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
 `npm run dev` aplica migraciones Prisma pendientes, ejecuta el bootstrap
 idempotente de seeds e inicia el watcher. La importación de bases heredadas es
-explícita mediante `MIGRATION_IMPORT_LEGACY_DATABASES=true`; su eliminación está
-desactivada por defecto.
+explícita mediante `MIGRATION_IMPORT_LEGACY_DATABASES=true`; su eliminación
+está desactivada por defecto.
 
 ## Prisma
 
@@ -35,8 +36,8 @@ npx prisma migrate resolve --applied 20260701000000_baseline
 
 La migración SQL baseline conserva checks e índices por expresión que Prisma
 Client no representa. `PrismaDataSource` centraliza consultas y lifecycle; las
-transacciones heredadas permanecen encapsuladas mientras se migran gradualmente
-a `$transaction`.
+transacciones heredadas permanecen encapsuladas mientras se migran
+gradualmente a `$transaction`.
 
 ## Calidad
 
@@ -46,10 +47,11 @@ npm run typecheck
 npm run test:unit
 npm run test:coverage
 npm run build
+npm run e2e
 ```
 
-Las pruebas usan Vitest y mocks del Prisma Client; las unitarias no requieren
-una base real. `npm run e2e` sí requiere la infraestructura y la API iniciadas.
+Las pruebas unitarias no requieren una base real. `npm run e2e` requiere la
+infraestructura y la API iniciadas.
 
 ## Flujo Git
 

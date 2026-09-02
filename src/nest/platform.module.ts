@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 import { config } from "../config.js";
 import { closeDatabase } from "../db.js";
-import { HttpError, readiness } from "../platform.js";
+import { normalizeApiError, readiness } from "../platform.js";
 import type { AppContext } from "../types.js";
 import { APP_CONTEXT, APP_OWNS_CONTEXT, FASTIFY_SERVER } from "./tokens.js";
 
@@ -29,16 +29,14 @@ export class ApiExceptionFilter implements ExceptionFilter {
     const http = host.switchToHttp();
     const request = http.getRequest<FastifyRequest>();
     const reply = http.getResponse<FastifyReply>();
-    const status = exception instanceof HttpError
-      ? exception.statusCode
-      : Number((exception as { statusCode?: number } | null)?.statusCode ?? 500);
-    const error = exception instanceof Error ? exception : new Error("Error desconocido");
-
-    if (status >= 500) request.log.error(error);
-    reply.status(status).send({
-      error: status >= 500 ? "internal_error" : "request_error",
-      message: error.message,
-      ...(exception instanceof HttpError && exception.details ? { details: exception.details } : {})
+    const normalized = normalizeApiError(exception);
+    if (normalized.statusCode >= 500) request.log.error(exception instanceof Error ? exception : new Error(normalized.message));
+    reply.status(normalized.statusCode).send({
+      error: normalized.statusCode >= 500 ? "internal_error" : "request_error",
+      code: normalized.code,
+      message: normalized.message,
+      ...(normalized.details === undefined ? {} : { details: normalized.details }),
+      request_id: request.id,
     });
   }
 }

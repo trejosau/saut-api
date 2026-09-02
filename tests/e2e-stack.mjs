@@ -1,5 +1,8 @@
 /* global process, fetch, console */
 
+import { WebSocket } from "ws";
+import { clearTimeout, setTimeout } from "node:timers";
+
 const base = process.env.API_BASE_URL ?? "http://localhost:8080";
 
 async function request(method, path, body) {
@@ -14,7 +17,33 @@ async function request(method, path, body) {
   return text.startsWith("{") || text.startsWith("[") ? JSON.parse(text) : text;
 }
 
+async function verifySalesMapSocket() {
+  const socketUrl = `${base.replace(/^http/, "ws")}/ws/map`;
+  const message = await new Promise((resolve, reject) => {
+    const socket = new WebSocket(socketUrl);
+    const timeout = setTimeout(() => {
+      socket.terminate();
+      reject(new Error(`WebSocket did not acknowledge ${socketUrl}`));
+    }, 5_000);
+
+    socket.once("message", (payload) => {
+      clearTimeout(timeout);
+      socket.close();
+      resolve(String(payload));
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
+  const event = JSON.parse(message);
+  if (event.type !== "connected" || event.channel !== "sales-map") {
+    throw new Error(`Unexpected sales-map WebSocket acknowledgement: ${message}`);
+  }
+}
+
 await request("GET", "/ready");
+await verifySalesMapSocket();
 const publications = await request("GET", "/catalog/publications");
 if (!Array.isArray(publications) || !publications[0]) throw new Error("Catalog seed missing");
 
