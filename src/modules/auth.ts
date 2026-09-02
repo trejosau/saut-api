@@ -19,10 +19,73 @@ type AuthResult = {
   refresh_token: string;
   actor_type: string;
   expires_in_sec: number;
+  session_expires_in_sec: number;
   is_new_account: boolean;
   primary_email: string | null;
   return_to?: string | null;
 };
+
+type RefreshResult = Pick<AuthResult,
+  "account_id" | "session_id" | "access_token" | "refresh_token" | "actor_type" |
+  "expires_in_sec" | "session_expires_in_sec" | "primary_email"
+>;
+
+const refreshResultSchema = z.object({
+  account_id: z.string().min(1),
+  session_id: z.string().min(1),
+  access_token: z.string().min(1),
+  refresh_token: z.string().min(1),
+  actor_type: z.string().min(1),
+  expires_in_sec: z.number().positive(),
+  session_expires_in_sec: z.number().positive(),
+  primary_email: z.string().nullable(),
+});
+
+const REFRESH_CLIENT_HEADER = "x-refresh-client";
+const REFRESH_ROTATION_CACHE_TTL_SEC = 10;
+const REFRESH_ROTATION_LOCK_TTL_SEC = 5;
+
+function refreshClientId(request: FastifyRequest): string | null {
+  const value = request.headers[REFRESH_CLIENT_HEADER];
+  return typeof value === "string" && /^[A-Za-z0-9_-]{16,128}$/.test(value) ? value : null;
+}
+
+async function readRefreshRotationCache(context: AppContext, key: string): Promise<RefreshResult | null> {
+  let raw: string | null;
+  try {
+    raw = await context.redis.get(key);
+  } catch {
+    return null;
+  }
+  if (!raw) return null;
+  try {
+    return refreshResultSchema.parse(JSON.parse(raw));
+  } catch {
+    await context.redis.del(key).catch(() => undefined);
+    return null;
+  }
+}
+
+async function readActiveRefreshRotationCache(context: AppContext, key: string): Promise<RefreshResult | null> {
+  const cached = await readRefreshRotationCache(context, key);
+  if (!cached) return null;
+  const session = await context.database.query<{ id: string }>(`
+    select s.id
+    from sessions s join accounts a on a.id = s.account_id
+    where s.id = $1 and s.refresh_token_hash = $2
+      and s.revoked_at is null and s.expires_at > now() and a.status = 'active'
+  `, [cached.session_id, sha256(cached.refresh_token)]);
+  return session.rows[0] ? cached : null;
+}
+
+async function waitForRefreshRotationCache(context: AppContext, key: string): Promise<RefreshResult | null> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const cached = await readActiveRefreshRotationCache(context, key);
+    if (cached) return cached;
+    if (attempt < 19) await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return null;
+}
 
 async function issueSession(
   context: AppContext,
@@ -45,6 +108,7 @@ async function issueSession(
     refresh_token: refreshToken,
     actor_type: account.actor_type,
     expires_in_sec: config.AUTH_ACCESS_TTL_SEC,
+    session_expires_in_sec: config.AUTH_SESSION_TTL_SEC,
     is_new_account: isNewAccount,
     primary_email: account.primary_email,
     ...(returnTo !== undefined ? { return_to: returnTo } : {})
@@ -157,18 +221,6 @@ async function exchangeGoogle(context: AppContext, request: FastifyRequest, body
   return issueSession(context, account, request, created, String(stateData.return_to ?? "/"));
 }
 
-function googleSuccessHtml(payload: AuthResult): string {
-  const data = JSON.stringify({
-    redirectTo: payload.return_to || "/",
-    session: {
-      accountId: payload.account_id, sessionId: payload.session_id, accessToken: payload.access_token,
-      refreshToken: payload.refresh_token, actorType: payload.actor_type, expiresInSec: payload.expires_in_sec,
-      isNewAccount: payload.is_new_account, email: payload.primary_email
-    }
-  }).replaceAll("<", "\\u003c");
-  return `<!doctype html><html lang="es"><meta charset="utf-8"><title>Completando acceso</title><body><p>Completando acceso con Google…</p><script>(()=>{const p=${data};const s={accountId:p.session.accountId,sessionId:p.session.sessionId,accessToken:p.session.accessToken,refreshToken:p.session.refreshToken,actorType:p.session.actorType,expiresAt:Date.now()+p.session.expiresInSec*1000,isNewAccount:p.session.isNewAccount,email:p.session.email};localStorage.setItem('saut.auth.session',JSON.stringify(s));localStorage.removeItem('saut.auth.pending');localStorage.setItem('login','true');location.replace(p.redirectTo||'/');})()</script></body></html>`;
-}
-
 async function accessResponse(context: AppContext, accountId: string): Promise<any> {
   const account = await context.database.query<{ actor_type: string }>("select actor_type from accounts where id = $1", [accountId]);
   if (!account.rows[0]) throw new HttpError(404, "Cuenta no encontrada");
@@ -226,38 +278,195 @@ export async function registerAuth(app: FastifyInstance, context: AppContext): P
     return reply.redirect(result.authorization_url);
   });
   app.post("/auth/google/exchange", async (request) => exchangeGoogle(context, request, asObject(request.body)));
+  app.post("/auth/google/consume", async (request) => {
+    const body = asObject(request.body);
+    const ticket = z.string().min(32).max(128).parse(body.ticket);
+    const expectedState = z.string().min(1).max(512).parse(body.state);
+    const stored = await context.redis.getdel(`auth:google:handoff:${ticket}`);
+    if (!stored) throw new HttpError(401, "Acceso de Google inválido o expirado");
+
+    const handoff = asObject(JSON.parse(stored));
+    const state = z.string().min(1).max(512).parse(handoff.state);
+    if (!secureEqual(state, expectedState)) throw new HttpError(401, "Estado de Google inválido o expirado");
+
+    const session = asObject(handoff.payload);
+    return {
+      account_id: z.string().min(1).parse(session.account_id),
+      session_id: z.string().min(1).parse(session.session_id),
+      access_token: z.string().min(1).parse(session.access_token),
+      refresh_token: z.string().min(1).parse(session.refresh_token),
+      actor_type: z.string().min(1).parse(session.actor_type),
+      expires_in_sec: z.number().positive().parse(session.expires_in_sec),
+      session_expires_in_sec: z.number().positive().parse(session.session_expires_in_sec),
+      is_new_account: z.boolean().parse(session.is_new_account),
+      primary_email: session.primary_email === null ? null : z.string().email().parse(session.primary_email),
+      return_to: session.return_to === undefined || session.return_to === null
+        ? session.return_to
+        : z.string().parse(session.return_to),
+    } satisfies AuthResult;
+  });
   app.get("/api/auth/google/callback", async (request, reply) => {
     const query = asObject(request.query);
+    const state = z.string().min(1).max(512).parse(query.state);
     const payload = await exchangeGoogle(context, request, { ...query, redirect_uri: config.AUTH_GOOGLE_REDIRECT_URI });
-    return reply.type("text/html; charset=utf-8").header("cache-control", "no-store").send(googleSuccessHtml(payload));
+    const ticket = randomToken(32);
+    await context.redis.set(
+      `auth:google:handoff:${ticket}`,
+      JSON.stringify({ state, payload }),
+      "EX",
+      60
+    );
+    const target = new URL("/api/auth/google/callback", config.AUTH_GOOGLE_FRONTEND_BASE_URL);
+    target.searchParams.set("ticket", ticket);
+    target.searchParams.set("state", state);
+    return reply.header("cache-control", "no-store").redirect(target.toString());
   });
 
   app.post("/auth/token/refresh", async (request) => {
-    const oldToken = z.string().min(32).parse(asObject(request.body).refresh_token);
-    const found = await context.database.query<any>(`
-      select s.*, a.actor_type, a.status from sessions s join accounts a on a.id = s.account_id
-      where s.refresh_token_hash = $1 and s.revoked_at is null and s.expires_at > now()
-    `, [sha256(oldToken)]);
-    const session = found.rows[0];
-    if (!session || session.status !== "active") throw new HttpError(401, "Refresh token inválido o expirado");
+    const oldToken = z.string().min(32).max(128).parse(asObject(request.body).refresh_token);
+    const oldHash = sha256(oldToken);
+    const clientId = refreshClientId(request);
+    const rotationKey = clientId
+      ? `auth:refresh:rotation:${oldHash}:${sha256(clientId)}`
+      : null;
+    const lockKey = rotationKey ? `${rotationKey}:lock` : null;
+    let lockValue: string | null = null;
+    let lockAcquired = false;
+
+    if (rotationKey && lockKey) {
+      const cached = await readActiveRefreshRotationCache(context, rotationKey);
+      if (cached) return cached;
+
+      lockValue = randomToken(24);
+      let lockAvailable = true;
+      let lockResult: string | null = null;
+      try {
+        lockResult = await context.redis.set(lockKey, lockValue, "EX", REFRESH_ROTATION_LOCK_TTL_SEC, "NX");
+      } catch {
+        lockAvailable = false;
+      }
+      if (lockAvailable && lockResult !== "OK") {
+        const waited = await waitForRefreshRotationCache(context, rotationKey);
+        if (waited) return waited;
+        throw new HttpError(503, "La renovación de sesión está temporalmente ocupada");
+      }
+      lockAcquired = lockAvailable;
+    }
+
     const refreshToken = randomToken(48);
-    await context.database.query("update sessions set refresh_token_hash = $2, last_seen_at = now() where id = $1", [session.id, sha256(refreshToken)]);
-    return { access_token: await signAccessToken({ accountId: session.account_id, actorType: session.actor_type, sessionId: session.id }), refresh_token: refreshToken, expires_in_sec: config.AUTH_ACCESS_TTL_SEC };
+    try {
+      const rotated = await context.database.query<{
+        session_id: string;
+        account_id: string;
+        actor_type: string;
+        primary_email: string | null;
+        session_expires_in_sec: number;
+      }>(`
+        update sessions s
+        set previous_refresh_token_hash = s.refresh_token_hash,
+            refresh_token_hash = $2,
+            last_seen_at = now()
+        from accounts a
+        where s.refresh_token_hash = $1
+          and s.revoked_at is null
+          and s.expires_at > now()
+          and a.id = s.account_id
+          and a.status = 'active'
+        returning s.id as session_id, s.account_id, a.actor_type, a.primary_email,
+          greatest(1, floor(extract(epoch from (s.expires_at - now()))))::int as session_expires_in_sec
+      `, [oldHash, sha256(refreshToken)]);
+      const session = rotated.rows[0];
+      if (session) {
+        const result: RefreshResult = {
+          account_id: session.account_id,
+          session_id: session.session_id,
+          actor_type: session.actor_type,
+          primary_email: session.primary_email,
+          access_token: await signAccessToken({ accountId: session.account_id, actorType: session.actor_type, sessionId: session.session_id }),
+          refresh_token: refreshToken,
+          expires_in_sec: config.AUTH_ACCESS_TTL_SEC,
+          session_expires_in_sec: session.session_expires_in_sec ?? config.AUTH_SESSION_TTL_SEC,
+        };
+        if (rotationKey) {
+          await context.redis.set(rotationKey, JSON.stringify(result), "EX", REFRESH_ROTATION_CACHE_TTL_SEC).catch(() => undefined);
+        }
+        return result;
+      }
+
+      if (rotationKey) {
+        const cached = await readActiveRefreshRotationCache(context, rotationKey);
+        if (cached) return cached;
+      }
+
+      const reused = await context.database.query<{ id: string }>(`
+        select id from sessions
+        where previous_refresh_token_hash = $1 and revoked_at is null and expires_at > now()
+        limit 1
+      `, [oldHash]);
+      if (reused.rows[0]) {
+        await context.database.query(
+          "update sessions set revoked_at = now(), revoke_reason = $2 where id = $1 and revoked_at is null",
+          [reused.rows[0].id, "refresh_token_reuse"]
+        );
+      }
+      throw new HttpError(401, "Refresh token inválido o expirado");
+    } finally {
+      if (lockAcquired && lockKey && lockValue) {
+        await context.redis.eval(
+          "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+          1,
+          lockKey,
+          lockValue
+        ).catch(() => undefined);
+      }
+    }
   });
   app.post("/auth/session/revoke", async (request) => {
     const body = asObject(request.body);
-    let sessionId = body.session_id as string | undefined;
+    const requestedSessionId = body.session_id === undefined
+      ? undefined
+      : z.string().uuid().parse(body.session_id);
+    const refreshToken = body.refresh_token === undefined
+      ? undefined
+      : z.string().min(32).max(128).parse(body.refresh_token);
+    const reason = body.reason === undefined
+      ? "user_logout"
+      : z.string().trim().min(1).max(120).parse(body.reason);
     const token = bearerToken(request);
-    if (!sessionId && token) sessionId = (await verifyAccessToken(token)).sessionId;
-    if (!sessionId) throw new HttpError(400, "session_id requerido");
-    const result = await context.database.query("update sessions set revoked_at = now(), revoke_reason = $2 where id = $1 and revoked_at is null", [sessionId, body.reason ?? "user_logout"]);
+    let accessSessionId: string | undefined;
+    if (token) {
+      try {
+        accessSessionId = (await verifyAccessToken(token)).sessionId;
+      } catch (error) {
+        if (!refreshToken) throw error;
+      }
+    }
+
+    let refreshSessionId: string | undefined;
+    if (refreshToken) {
+      const refreshSession = await context.database.query<{ id: string }>(
+        "select id from sessions where refresh_token_hash = $1 and revoked_at is null limit 1",
+        [sha256(refreshToken)]
+      );
+      refreshSessionId = refreshSession.rows[0]?.id;
+    }
+
+    if (accessSessionId && refreshSessionId && accessSessionId !== refreshSessionId) {
+      throw new HttpError(403, "Las credenciales no pertenecen a la misma sesión");
+    }
+    const sessionId = accessSessionId ?? refreshSessionId;
+    if (!sessionId) throw new HttpError(401, "Se requiere autenticación");
+    if (requestedSessionId && requestedSessionId !== sessionId) {
+      throw new HttpError(403, "La sesión no pertenece a las credenciales enviadas");
+    }
+    const result = await context.database.query("update sessions set revoked_at = now(), revoke_reason = $2 where id = $1 and revoked_at is null", [sessionId, reason]);
     return { revoked: (result.rowCount ?? 0) > 0 };
   });
   app.get("/auth/me", async (request) => {
     const actor = await authenticate(request);
     const result = await context.database.query<any>("select * from accounts where id = $1", [actor.accountId]);
     const account = result.rows[0];
-    return { account_id: account.id, actor_type: account.actor_type, status: account.status, display_name: account.display_name,
+    return { account_id: account.id, session_id: actor.sessionId, actor_type: account.actor_type, status: account.status, display_name: account.display_name,
       primary_email: account.primary_email, roles: actor.roles, permissions: actor.permissions };
   });
 
@@ -311,7 +520,25 @@ export async function registerAuth(app: FastifyInstance, context: AppContext): P
   app.get<{ Params: { account_id: string } }>("/admin/auth/accounts/:account_id/access", async (request) => accessResponse(context, request.params.account_id));
   app.post<{ Params: { account_id: string } }>("/admin/auth/accounts/:account_id/status", async (request) => {
     const body = asObject(request.body);
-    const result = await context.database.query<any>("update accounts set status=$2,updated_at=now() where id=$1 returning id as account_id,actor_type,status,display_name,primary_email,created_at,updated_at,last_login_at", [request.params.account_id, body.status]);
+    const status = z.string().trim().min(1).max(32).parse(body.status).toLowerCase();
+    const reason = body.reason === undefined
+      ? "account_status_changed"
+      : z.string().trim().min(1).max(120).parse(body.reason);
+    const result = await context.database.query<any>(`
+      with updated_account as (
+        update accounts
+        set status=$2,updated_at=now()
+        where id=$1
+        returning id as account_id,actor_type,status,display_name,primary_email,created_at,updated_at,last_login_at
+      ), revoked_sessions as (
+        update sessions
+        set revoked_at=now(),revoke_reason=$3
+        where account_id=$1 and revoked_at is null and $2 <> 'active'
+        returning id
+      )
+      select updated_account.*,(select count(*)::int from revoked_sessions) as revoked_sessions
+      from updated_account
+    `, [request.params.account_id, status, reason]);
     if (!result.rows[0]) throw new HttpError(404, "Cuenta no encontrada");
     await audit(request, "account.status_updated", "account", request.params.account_id, body); return { ...result.rows[0], roles: (await accountAccess(request.params.account_id)).roles };
   });

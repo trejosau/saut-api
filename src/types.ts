@@ -9,7 +9,7 @@ import type { PrismaDataSource } from "./database/prisma-data-source.js";
 export type Actor = {
   accountId: string;
   actorType: string;
-  sessionId?: string;
+  sessionId: string;
   roles: string[];
   permissions: string[];
 };

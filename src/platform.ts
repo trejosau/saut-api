@@ -162,17 +162,27 @@ export async function verifyAccessToken(token: string): Promise<Actor> {
   try {
     const { payload } = await jwtVerify(token, tokenSecret, { algorithms: ["HS256"] });
     if (!payload.sub) throw new Error("missing subject");
+    const sessionId = typeof payload.session_id === "string" ? payload.session_id : "";
+    if (!sessionId) throw new Error("missing session");
     const account = await database.query<{ actor_type: string; status: string }>(
       "select actor_type, status from accounts where id = $1",
       [payload.sub]
     );
     const row = account.rows[0];
     if (!row || row.status !== "active") throw new HttpError(401, "Cuenta inactiva o inexistente");
+    const session = await database.query<{ account_id: string; revoked_at: Date | null; expires_at: Date }>(
+      "select account_id, revoked_at, expires_at from sessions where id = $1 and account_id = $2",
+      [sessionId, payload.sub]
+    );
+    const expiresAt = session.rows[0] ? new Date(session.rows[0].expires_at).getTime() : Number.NaN;
+    if (!session.rows[0] || session.rows[0].revoked_at !== null || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      throw new HttpError(401, "Sesión revocada o expirada");
+    }
     const access = await accountAccess(payload.sub);
     return {
       accountId: payload.sub,
-      actorType: String(payload.actor_type ?? row.actor_type),
-      sessionId: payload.session_id ? String(payload.session_id) : undefined,
+      actorType: row.actor_type,
+      sessionId,
       ...access
     };
   } catch (error) {
