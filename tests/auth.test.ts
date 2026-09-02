@@ -14,7 +14,7 @@ vi.mock("../src/db.js", () => ({
 }));
 
 import { registerAuth } from "../src/modules/auth.js";
-import { signAccessToken, verifyAccessToken } from "../src/platform.js";
+import { hmac, signAccessToken, verifyAccessToken } from "../src/platform.js";
 
 const accountId = "11111111-1111-4111-8111-111111111111";
 const sessionId = "22222222-2222-4222-8222-222222222222";
@@ -217,5 +217,57 @@ describe("Google handoff boundary", () => {
 
     expect(response.statusCode).toBe(401);
     expect(database.query).not.toHaveBeenCalled();
+  });
+});
+
+describe("email login challenge lifecycle", () => {
+  beforeEach(() => {
+    database.query.mockReset();
+  });
+
+  it("rejects an expired challenge using the database clock predicate", async () => {
+    const challengeId = "33333333-3333-4333-8333-333333333333";
+    const code = "123456";
+    database.query.mockImplementation(async (sql: string) => {
+      const normalized = sql.replaceAll(/\s+/g, " ").toLowerCase();
+      if (normalized.includes("from login_challenges")) {
+        return normalized.includes("expires_at > now()")
+          ? { rows: [], rowCount: 0 }
+          : { rows: [{ id: challengeId, code_hash: hmac(`${challengeId}:${code}`), attempts: 0, max_attempts: 5 }], rowCount: 1 };
+      }
+      if (normalized.includes("from account_identities")) {
+        return { rows: [{ id: accountId, actor_type: "customer", primary_email: "user@example.com", status: "active" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+    const app = await authRoutes();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/auth/email/verify",
+      payload: { email: "user@example.com", code },
+    });
+    await app.close();
+
+    expect(response.statusCode).toBe(401);
+    expect(String(database.query.mock.calls[0]?.[0]).replaceAll(/\s+/g, " ").toLowerCase()).toContain("expires_at > now()");
+  });
+
+  it("rejects a challenge after its maximum attempts", async () => {
+    database.query.mockResolvedValueOnce({
+      rows: [{ id: "44444444-4444-4444-8444-444444444444", attempts: 5, max_attempts: 5 }],
+      rowCount: 1,
+    });
+    const app = await authRoutes();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/auth/email/verify",
+      payload: { email: "user@example.com", code: "123456" },
+    });
+    await app.close();
+
+    expect(response.statusCode).toBe(429);
+    expect(database.query).toHaveBeenCalledTimes(1);
   });
 });

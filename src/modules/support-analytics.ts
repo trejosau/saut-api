@@ -170,6 +170,7 @@ export async function registerSupportAnalytics(app:FastifyInstance,context:AppCo
           refundId=randomUUID();
           transactionId=transaction.id;
           providerChargeId=transaction.provider_charge_id??null;
+          if(body.mode==="auto"&&config.STRIPE_MODE==="live"&&!providerChargeId)throw new HttpError(422,"La transacción no cuenta con identificador de cargo para reembolso automático");
           if(autoAllowed)await client.query("update payment_transactions set refunded_amount_mxn=refunded_amount_mxn+$2,updated_at=now()where id=$1",[transaction.id,refundAmount]);
           await client.query("insert into refunds(id,payment_transaction_id,reason,amount_mxn,status,provider_refund_id)values($1,$2,$3,$4,$5,$6)",[refundId,transaction.id,body.reason_code,refundAmount,autoAllowed?"processing":"pending_manual",null]);
           recorded=true;
