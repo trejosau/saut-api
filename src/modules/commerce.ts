@@ -394,6 +394,14 @@ export async function registerCommerce(app: FastifyInstance, context: AppContext
       if (!checkout) throw new HttpError(404, "Checkout no encontrado");
       await cartForAccess(context, request, checkout.cart_id, client);
       if (checkout.status !== "pending") throw new HttpError(409, "Checkout no disponible para pago");
+      if (checkout.payment_attempt_id) {
+        const existing = (await client.query("select * from payment_attempts where id=$1", [checkout.payment_attempt_id])).rows[0];
+        if (existing && (existing.status === "pending" || existing.status === "succeeded")) {
+          await client.query("commit");
+          reply.status(200);
+          return attemptResponse(existing);
+        }
+      }
       const items = (await client.query("select * from cart_items where cart_id=$1", [checkout.cart_id])).rows;
       const id = randomUUID();
       const reservations = await reserveStock(client, items, id);

@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { config } from "../config.js";
 import {
-  accountAccess, asObject, audit, authenticate, bearerToken, hmac, HttpError, normalizeEmail,
+  accountAccess, asObject, audit, authenticate, bearerToken, fetchExternal, hmac, HttpError, normalizeEmail,
   randomToken, secureEqual, sha256, signAccessToken, verifyAccessToken
 } from "../platform.js";
 import type { AppContext } from "../types.js";
@@ -153,7 +153,7 @@ async function findOrCreateEmailAccount(context: AppContext, email: string): Pro
 }
 
 async function googleDiscovery(): Promise<{ authorization_endpoint: string; token_endpoint: string; userinfo_endpoint: string }> {
-  const response = await fetch(config.AUTH_GOOGLE_DISCOVERY_URL);
+  const response = await fetchExternal(config.AUTH_GOOGLE_DISCOVERY_URL);
   if (!response.ok) throw new HttpError(503, "Google temporalmente no disponible");
   return response.json() as Promise<any>;
 }
@@ -181,7 +181,7 @@ async function exchangeGoogle(context: AppContext, request: FastifyRequest, body
   if (!stored) throw new HttpError(401, "Estado de Google inválido o expirado");
   const stateData = asObject(JSON.parse(stored));
   const discovery = await googleDiscovery();
-  const tokenResponse = await fetch(discovery.token_endpoint, {
+  const tokenResponse = await fetchExternal(discovery.token_endpoint, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -194,7 +194,7 @@ async function exchangeGoogle(context: AppContext, request: FastifyRequest, body
   });
   if (!tokenResponse.ok) throw new HttpError(401, "No se pudo completar el login con Google");
   const tokens = asObject(await tokenResponse.json());
-  const userResponse = await fetch(discovery.userinfo_endpoint, { headers: { authorization: `Bearer ${tokens.access_token}` } });
+  const userResponse = await fetchExternal(discovery.userinfo_endpoint, { headers: { authorization: `Bearer ${tokens.access_token}` } });
   if (!userResponse.ok) throw new HttpError(401, "No se pudo validar la cuenta de Google");
   const user = asObject(await userResponse.json());
   const subject = z.string().min(1).parse(user.sub);

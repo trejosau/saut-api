@@ -123,6 +123,47 @@ export function randomToken(bytes = 32): string {
   return randomBytes(bytes).toString("base64url");
 }
 
+const sensitiveKey = /(password|token|secret|authorization|cookie|api[_-]?key|totp|recovery|session[_-]?id|client[_-]?secret|credential)/i;
+
+export function redactSensitive(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactSensitive);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key,
+      sensitiveKey.test(key) ? "[REDACTED]" : redactSensitive(item),
+    ]));
+  }
+  return value;
+}
+
+/** Performs an external request with a bounded deadline and no implicit redirects. */
+export async function fetchExternal(
+  input: string | URL,
+  init: RequestInit = {},
+  timeoutMs = config.EXTERNAL_REQUEST_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const callerSignal = init.signal;
+  const abortCaller = () => controller.abort(callerSignal?.reason);
+  if (callerSignal) {
+    if (callerSignal.aborted) controller.abort(callerSignal.reason);
+    else callerSignal.addEventListener("abort", abortCaller, { once: true });
+  }
+  try {
+    return await fetch(input, {
+      ...init,
+      redirect: init.redirect ?? "error",
+      signal: controller.signal,
+    });
+  } catch {
+    throw new HttpError(503, "Proveedor externo no disponible", undefined, "SERVICE_UNAVAILABLE");
+  } finally {
+    clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", abortCaller);
+  }
+}
+
 const tokenSecret = new TextEncoder().encode(config.AUTH_TOKEN_SECRET);
 
 export async function signAccessToken(actor: Omit<Actor, "roles" | "permissions">): Promise<string> {
@@ -215,11 +256,11 @@ export async function audit(request: FastifyRequest, action: string, resourceTyp
     insert into audit_log (id, account_id, actor_type, action, resource_type, resource_id, payload, ip, user_agent)
     values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
   `, [randomUUID(), request.actor?.accountId ?? null, request.actor?.actorType ?? "system", action, resourceType,
-    resourceId ?? null, payload ? JSON.stringify(payload) : null, request.ip, request.headers["user-agent"] ?? null]);
+    resourceId ?? null, payload === undefined ? null : JSON.stringify(redactSensitive(payload)), request.ip, request.headers["user-agent"] ?? null]);
 }
 
 export function pagination(query: Record<string, unknown>): { limit: number; offset: number } {
-  const limit = Math.min(Math.max(Number(query.limit ?? 50) || 50, 1), 200);
+  const limit = Math.min(Math.max(Number(query.limit ?? 50) || 50, 1), config.PAGINATION_MAX);
   const offset = Math.max(Number(query.offset ?? 0) || 0, 0);
   return { limit, offset };
 }
@@ -333,9 +374,38 @@ export function permissionForPath(path: string, method: string): string | undefi
 }
 
 export async function buildFastifyServer(context: AppContext): Promise<FastifyInstance> {
-  const app = Fastify({ logger: true, bodyLimit: 100 * 1024 * 1024, trustProxy: true, requestIdHeader: "x-request-id" });
+  const app = Fastify({
+    logger: {
+      redact: {
+        paths: [
+          "req.headers.authorization",
+          "req.headers.cookie",
+          "req.headers['set-cookie']",
+          "req.body.password",
+          "req.body.token",
+          "req.body.refresh_token",
+          "req.body.code",
+          "req.body.secret",
+          "res.headers['set-cookie']",
+        ],
+        censor: "[REDACTED]",
+      },
+    },
+    bodyLimit: config.REQUEST_BODY_LIMIT_BYTES,
+    trustProxy: true,
+    requestIdHeader: "x-request-id",
+  });
   try {
     app.context = context;
+    app.addHook("onSend", async (request, reply, payload) => {
+      reply.header("x-request-id", request.id);
+      reply.header("x-content-type-options", "nosniff");
+      reply.header("referrer-policy", "no-referrer");
+      reply.header("permissions-policy", "camera=(), microphone=(), geolocation=()");
+      reply.header("content-security-policy", "frame-ancestors 'none'");
+      if (config.NODE_ENV === "production") reply.header("strict-transport-security", "max-age=31536000; includeSubDomains");
+      return payload;
+    });
     await app.register(cors, {
       origin: (origin, callback) => callback(null, !origin || config.corsOrigins.includes(origin)),
       credentials: true

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { hmac, normalizeApiError, normalizeEmail, secureEqual, sha256 } from "../src/platform.js";
+import { hmac, normalizeApiError, normalizeEmail, redactSensitive, secureEqual, sha256 } from "../src/platform.js";
 import { z } from "zod";
 
 describe("platform security helpers", () => {
@@ -23,5 +23,12 @@ describe("platform security helpers", () => {
     const internal = normalizeApiError(new Error("database password"));
     expect(internal.statusCode).toBe(500);
     expect(internal.message).not.toContain("password");
+  });
+
+  it("redacts credentials before audit persistence", () => {
+    expect(redactSensitive({ password: "secret", nested: { refresh_token: "token", safe: "value" } })).toEqual({
+      password: "[REDACTED]",
+      nested: { refresh_token: "[REDACTED]", safe: "value" },
+    });
   });
 });

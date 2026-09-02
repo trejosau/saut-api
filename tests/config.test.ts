@@ -13,6 +13,7 @@ const productionEnvironment = {
   AUTH_DEV_RETURN_CODE: "false",
   NOTIFICATION_DEV_MODE: "false",
   MIGRATION_DROP_LEGACY_DATABASES: "false",
+  RATE_LIMIT_FAIL_OPEN: "false",
   STRIPE_MODE: "live",
   SKYDROPX_MODE: "live"
 } satisfies NodeJS.ProcessEnv;
@@ -28,5 +29,9 @@ describe("parseConfig", () => {
 
   it("rejects development defaults in production", () => {
     expect(() => parseConfig({ NODE_ENV: "production" })).toThrowError();
+  });
+
+  it("rejects fail-open rate limiting in production", () => {
+    expect(() => parseConfig({ ...productionEnvironment, RATE_LIMIT_FAIL_OPEN: "true" })).toThrowError();
   });
 });

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { config } from "../config.js";
-import { HttpError } from "../platform.js";
+import { fetchExternal, HttpError } from "../platform.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -51,7 +51,7 @@ async function accessToken(): Promise<string> {
   });
   if (config.SKYDROPX_SCOPE) form.set("scope", config.SKYDROPX_SCOPE);
 
-  const response = await fetch(`${config.SKYDROPX_BASE_URL}/api/v1/oauth/token`, {
+  const response = await fetchExternal(`${config.SKYDROPX_BASE_URL}/api/v1/oauth/token`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: form,
@@ -144,7 +144,7 @@ export async function quoteNational(
   }
 
   const token = await accessToken();
-  const response = await fetch(`${config.SKYDROPX_BASE_URL}/api/v1/quotations`, {
+  const response = await fetchExternal(`${config.SKYDROPX_BASE_URL}/api/v1/quotations`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ quotation: {
@@ -180,7 +180,7 @@ export async function quoteNational(
   let rates = ratesFrom(payload, quotationId);
 
   if (!rates.length && quotationId) {
-    const lookup = await fetch(`${config.SKYDROPX_BASE_URL}/api/v1/quotations/${quotationId}`, {
+    const lookup = await fetchExternal(`${config.SKYDROPX_BASE_URL}/api/v1/quotations/${quotationId}`, {
       headers: { authorization: `Bearer ${token}` },
     });
     if (lookup.ok) {
@@ -213,7 +213,7 @@ export async function createNationalShipment(
 
   const token = await accessToken();
   const address = toRecord(order.address);
-  const response = await fetch(`${config.SKYDROPX_BASE_URL}/api/v1/shipments/`, {
+  const response = await fetchExternal(`${config.SKYDROPX_BASE_URL}/api/v1/shipments/`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ shipment: {
@@ -287,7 +287,7 @@ export async function fetchTracking(
   const url = new URL(`${config.SKYDROPX_BASE_URL}/api/v1/shipments/tracking`);
   url.searchParams.set("tracking_number", trackingNumber);
   url.searchParams.set("carrier_name", carrier);
-  const response = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
+  const response = await fetchExternal(url, { headers: { authorization: `Bearer ${token}` } });
   if (!response.ok) throw new HttpError(503, `Skydropx tracking falló (${response.status})`);
 
   const raw: unknown = await response.json();

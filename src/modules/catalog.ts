@@ -102,7 +102,8 @@ export async function registerCatalog(app: FastifyInstance, context: AppContext)
     const query = asObject(request.query); const values: any[] = []; const where = ["p.is_active=true", "p.visibility in ('public','visible')"];
     for (const key of ["category", "garment_type"]) if (query[key]) { values.push(query[key]); where.push(`p.${key}=$${values.length}`); }
     const sort = query.sort === "az" ? "p.title asc" : query.sort === "za" ? "p.title desc" : query.sort === "price_desc" ? "p.price_mxn desc" : query.sort === "price_asc" ? "p.price_mxn asc" : "p.sort_rank desc,p.created_at desc";
-    const rows = (await context.database.query(`${publicationSelect} where ${where.join(" and ")} order by ${sort}`, values)).rows;
+    const { limit, offset } = pagination(query); values.push(limit, offset);
+    const rows = (await context.database.query(`${publicationSelect} where ${where.join(" and ")} order by ${sort} limit $${values.length - 1} offset $${values.length}`, values)).rows;
     const result = [];
     for (const row of rows) {
       const variants = await context.database.query("select id,code,label,front_design_url,back_design_url,sort_rank from design_variants where design_id=$1 and is_active=true order by sort_rank", [row.design_id]);
@@ -111,10 +112,11 @@ export async function registerCatalog(app: FastifyInstance, context: AppContext)
     return result;
   });
   app.get<{ Params: { slug: string } }>("/catalog/publications/:slug", async (request) => publicationDetail(context, "slug", request.params.slug, true));
-  app.get("/catalog/collections", async () => {
+  app.get("/catalog/collections", async (request) => {
+    const { limit, offset } = pagination(asObject(request.query));
     const rows = (await context.database.query(`select c.*,case when c.cover_asset_id is null then null else '/assets/'||c.cover_asset_id||'/download' end cover_url,
       case when ii.asset_id is null then null else '/assets/'||ii.asset_id||'/download' end informative_image_url
-      from collections_sets c left join informative_images ii on ii.id=c.informative_image_id where c.visibility in ('public','visible') order by c.created_at desc`)).rows; return rows;
+      from collections_sets c left join informative_images ii on ii.id=c.informative_image_id where c.visibility in ('public','visible') order by c.created_at desc limit $1 offset $2`, [limit, offset])).rows; return rows;
   });
   app.get<{ Params: { slug: string } }>("/catalog/collections/:slug", async (request) => {
     const collection = (await context.database.query("select * from collections_sets where slug=$1 and visibility in ('public','visible')", [request.params.slug])).rows[0];
@@ -126,7 +128,8 @@ export async function registerCatalog(app: FastifyInstance, context: AppContext)
     const query = asObject(request.query); const values: any[]=[]; const where:string[]=[];
     where.push("visibility in ('public','visible')");
     if(query.status){values.push(query.status);where.push(`status=$${values.length}`);}
-    return (await context.database.query(`select *,case when cover_asset_id is null then null else '/assets/'||cover_asset_id||'/download' end cover_url from drops ${where.length?`where ${where.join(" and ")}`:""} order by created_at desc`,values)).rows;
+    const { limit, offset } = pagination(query); values.push(limit, offset);
+    return (await context.database.query(`select *,case when cover_asset_id is null then null else '/assets/'||cover_asset_id||'/download' end cover_url from drops ${where.length?`where ${where.join(" and ")}`:""} order by created_at desc limit $${values.length - 1} offset $${values.length}`,values)).rows;
   });
   app.get<{ Params: { slug: string } }>("/catalog/drops/:slug", async (request) => {
     const drop=(await context.database.query("select * from drops where slug=$1 and visibility in ('public','visible')",[request.params.slug])).rows[0]; if(!drop)throw new HttpError(404,"Drop no encontrado");

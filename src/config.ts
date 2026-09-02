@@ -40,6 +40,9 @@ const schema = z.object({
   RATE_LIMIT_GLOBAL_MAX: z.coerce.number().int().positive().default(120),
   RATE_LIMIT_GLOBAL_WINDOW_SEC: z.coerce.number().int().positive().default(1),
   RATE_LIMIT_FAIL_OPEN: booleanValue.default(true),
+  REQUEST_BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(100 * 1024 * 1024),
+  PAGINATION_MAX: z.coerce.number().int().positive().default(200),
+  EXTERNAL_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
   S3_ENDPOINT: z.url().default("http://localhost:9000"),
   S3_PUBLIC_ENDPOINT: z.url().default("http://localhost:8080"),
   S3_REGION: z.string().default("us-east-1"),
@@ -109,7 +112,8 @@ const schema = z.object({
   const unsafeFlags: Array<keyof typeof values> = [
     "AUTH_DEV_RETURN_CODE",
     "NOTIFICATION_DEV_MODE",
-    "MIGRATION_DROP_LEGACY_DATABASES"
+    "MIGRATION_DROP_LEGACY_DATABASES",
+    "RATE_LIMIT_FAIL_OPEN"
   ];
   for (const path of unsafeFlags) {
     if (values[path] === true) {
@@ -126,6 +130,9 @@ const schema = z.object({
   }
   if (values.SKYDROPX_MODE === "mock") {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["SKYDROPX_MODE"], message: "must be live in production" });
+  }
+  if (values.CORS_ALLOWED_ORIGINS.split(",").some((origin) => origin.trim() === "*")) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["CORS_ALLOWED_ORIGINS"], message: "must not use wildcard origins in production" });
   }
 });
 
