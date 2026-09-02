@@ -277,7 +277,7 @@ async function stripeCheckout(context: AppContext, checkout: any, attemptId: str
     }
   }
   const checkoutPath = `/checkout?payment=success&payment_attempt=${encodeURIComponent(attemptId)}&checkout_id=${encodeURIComponent(checkout.id)}&session_id={CHECKOUT_SESSION_ID}`;
-  const cancelPath = `/checkout?checkout=cancelled&payment_attempt=${encodeURIComponent(attemptId)}&checkout_id=${encodeURIComponent(checkout.id)}`;
+  const cancelPath = `/checkout?checkout=cancel&payment_attempt=${encodeURIComponent(attemptId)}&checkout_id=${encodeURIComponent(checkout.id)}`;
   return context.stripe.checkout.sessions.create({
     mode: "payment",
     success_url: `${origin}${checkoutPath}`,
