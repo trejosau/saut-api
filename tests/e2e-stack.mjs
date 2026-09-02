@@ -5,16 +5,27 @@ import { clearTimeout, setTimeout } from "node:timers";
 
 const base = process.env.API_BASE_URL ?? "http://localhost:8080";
 
-async function request(method, path, body) {
+async function request(method, path, body, extraHeaders) {
   const response = await fetch(`${base}${path}`, {
     method,
-    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    headers: body === undefined ? extraHeaders : { "content-type": "application/json", ...extraHeaders },
     body: body === undefined ? undefined : JSON.stringify(body)
   });
   if (!response.ok) throw new Error(`${method} ${path}: ${response.status} ${await response.text()}`);
   if (response.status === 204) return undefined;
   const text = await response.text();
   return text.startsWith("{") || text.startsWith("[") ? JSON.parse(text) : text;
+}
+
+async function expectStatus(method, path, expectedStatus, body, extraHeaders) {
+  const response = await fetch(`${base}${path}`, {
+    method,
+    headers: body === undefined ? extraHeaders : { "content-type": "application/json", ...extraHeaders },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
+  if (response.status !== expectedStatus) {
+    throw new Error(`${method} ${path}: expected ${expectedStatus}, got ${response.status} ${await response.text()}`);
+  }
 }
 
 async function verifySalesMapSocket() {
@@ -48,7 +59,7 @@ const publications = await request("GET", "/catalog/publications");
 if (!Array.isArray(publications) || !publications[0]) throw new Error("Catalog seed missing");
 
 const cart = await request("POST", "/cart/sessions", {});
-await request("POST", `/cart/sessions/${cart.id}/items/predesigned`, {
+const cartWithItem = await request("POST", `/cart/sessions/${cart.id}/items/predesigned`, {
   publication_slug: publications[0].slug,
   publication_id: publications[0].id,
   garment_type: "tshirt",
@@ -57,8 +68,12 @@ await request("POST", `/cart/sessions/${cart.id}/items/predesigned`, {
   size: "M",
   grammage_g: 240,
   fit: "",
-  quantity: 1
+  quantity: 1,
+  unit_price_mxn: 1
 });
+if (Number(cartWithItem.items[0]?.unit_price_mxn) !== Number(publications[0].price_mxn)) {
+  throw new Error("Server accepted a client-controlled product price");
+}
 const checkout = await request("POST", "/checkout/sessions", {
   cart_id: cart.id,
   email: "e2e@saut.local",
@@ -67,8 +82,27 @@ const checkout = await request("POST", "/checkout/sessions", {
 });
 const attempt = await request("POST", "/payments/attempts", { checkout_session_id: checkout.id });
 const confirmed = await request("POST", `/payments/attempts/${attempt.id}/confirm`, {});
-if (!confirmed.order_id || confirmed.refunded_oversell) throw new Error("Payment/order flow failed");
-const order = await request("GET", `/orders/${confirmed.order_id}`);
+if (!confirmed.order_id || !confirmed.order_access_token || confirmed.refunded_oversell) throw new Error("Payment/order flow failed");
+await expectStatus("GET", `/orders/${confirmed.order_id}`, 403);
+const order = await request("GET", `/orders/${confirmed.order_id}`, undefined, {
+  "x-order-access-token": confirmed.order_access_token
+});
 if (order.id !== confirmed.order_id || order.items.length !== 1) throw new Error("Order contract failed");
+await expectStatus("PATCH", `/shipping/local/orders/${confirmed.order_id}/address`, 403, {
+  address: { line1: "Calle sin autorización 1" }
+});
+const addressChange = await request("PATCH", `/shipping/local/orders/${confirmed.order_id}/address`, {
+  address: { line1: "Av. Juárez 101", city: "Torreon", state: "Coahuila", postal_code: "27000", country: "MX" }
+}, { "x-order-access-token": confirmed.order_access_token });
+if (addressChange.address?.line1 !== "Av. Juárez 101") throw new Error("Authorized local address change failed");
+
+if (process.env.ASSETS_INTERNAL_API_KEY) {
+  const asset = await request("POST", "/assets/sign-upload", {
+    content_type: "image/png",
+    category: "support",
+    visibility: "internal"
+  }, { "x-internal-api-key": process.env.ASSETS_INTERNAL_API_KEY });
+  await expectStatus("GET", `/assets/${asset.asset_id}/resolve`, 404);
+}
 
 console.log(`E2E completed: ${order.id}`);

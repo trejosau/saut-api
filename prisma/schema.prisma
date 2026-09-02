@@ -446,6 +446,7 @@ model orders {
   checkout_session_id String                @unique @db.Uuid
   payment_attempt_id  String                @db.Uuid
   payment_reference   String
+  customer_access_token_hash String?
   customer_email      String
   customer_phone      String
   shipping_method     String

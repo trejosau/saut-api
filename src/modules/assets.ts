@@ -77,6 +77,21 @@ async function resolveAsset(context: AppContext, id: string): Promise<ResolvedAs
   return { asset_id: id, visibility: asset.visibility, content_type: asset.content_type, size_bytes: Number(asset.size_bytes), url: publicUrl ?? signedUrl, signed_url: signedUrl, public_url: publicUrl };
 }
 
+function publicResolution(asset: ResolvedAsset): Omit<ResolvedAsset, "signed_url"> {
+  if (asset.visibility !== "public" || !asset.public_url) {
+    // Do not disclose that an internal asset exists, nor mint a signed URL for it.
+    throw new HttpError(404, "Asset no encontrado");
+  }
+  return {
+    asset_id: asset.asset_id,
+    visibility: asset.visibility,
+    content_type: asset.content_type,
+    size_bytes: asset.size_bytes,
+    url: asset.public_url,
+    public_url: asset.public_url,
+  };
+}
+
 async function signUpload(context: AppContext, body: Record<string, unknown>, requestBaseUrl: string): Promise<SignedUpload> {
   const { contentType, category } = validateAssetUpload({
     contentType: String(body.content_type ?? "application/octet-stream"),
@@ -110,7 +125,7 @@ export async function registerAssets(app: FastifyInstance, context: AppContext):
     if (request.headers["x-internal-api-key"] !== config.ASSETS_INTERNAL_API_KEY) throw new HttpError(401, "API key de assets inválida");
     return signRead(request);
   });
-  app.get<{ Params: { asset_id: string } }>("/assets/:asset_id/resolve", async (request) => resolveAsset(context, request.params.asset_id));
+  app.get<{ Params: { asset_id: string } }>("/assets/:asset_id/resolve", async (request) => publicResolution(await resolveAsset(context, request.params.asset_id)));
   app.get<{ Params: { asset_id: string } }>("/admin/assets/:asset_id/resolve", async (request) => resolveAsset(context, request.params.asset_id));
   app.put<{ Params: { asset_id: string } }>("/assets/:asset_id/upload", async (request, reply) => {
     validateSignature(request.params.asset_id, asObject(request.query), "upload");
