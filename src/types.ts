@@ -27,6 +27,7 @@ export type AuthedRequest = FastifyRequest & { actor?: Actor };
 declare module "fastify" {
   interface FastifyRequest {
     actor?: Actor;
+    rawBody?: string;
   }
 
   interface FastifyInstance {

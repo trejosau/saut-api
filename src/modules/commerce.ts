@@ -297,6 +297,59 @@ export async function expirePaymentReservations(context: AppContext): Promise<vo
   }
 }
 
+export type ConfirmPaymentResult = {
+  attempt: any;
+  order_id: string | null;
+  order_access_token: string | null;
+  refunded_oversell: boolean;
+};
+
+/** Settles a payment while the caller owns the transaction and attempt lock. */
+export async function confirmPaymentAttemptInTransaction(
+  context: AppContext,
+  client: pg.PoolClient,
+  attemptId: string,
+  providerConfirmation?: { paymentIntentId?: string | null },
+): Promise<ConfirmPaymentResult> {
+  let attempt = (await client.query("select * from payment_attempts where id=$1 for update", [attemptId])).rows[0];
+  if (!attempt) throw new HttpError(404, "Intento de pago no encontrado");
+  const checkout = (await client.query("select * from checkout_sessions where id=$1", [attempt.checkout_session_id])).rows[0];
+  if (!checkout) throw new HttpError(404, "Checkout no encontrado");
+
+  if (attempt.status === "succeeded") {
+    const order = (await client.query("select id from orders where payment_attempt_id=$1", [attempt.id])).rows[0];
+    if (!order) throw new HttpError(409, "El pago no tiene un pedido asociado");
+    return {
+      attempt: { ...attempt },
+      order_id: order.id,
+      order_access_token: await replaceOrderAccessToken(client, order.id),
+      refunded_oversell: false,
+    };
+  }
+  if (attempt.status !== "pending") throw new HttpError(409, "Intento no confirmable");
+
+  let chargeId = providerConfirmation?.paymentIntentId || `mock_charge_${attempt.id}`;
+  if (config.STRIPE_MODE === "live" && !providerConfirmation?.paymentIntentId) {
+    const session = await context.stripe.checkout.sessions.retrieve(attempt.provider_payment_intent_id);
+    if (session.payment_status !== "paid") throw new HttpError(409, "El pago aún no está confirmado");
+    chargeId = typeof session.payment_intent === "string"
+      ? session.payment_intent
+      : String((session.payment_intent as any)?.id ?? session.id);
+  }
+  if (!Array.isArray(attempt.metadata?.reservations) || attempt.metadata.reservations_released) {
+    if (config.STRIPE_MODE === "live" && chargeId) await context.stripe.refunds.create({ payment_intent: chargeId }).catch(() => undefined);
+    attempt = (await client.query("update payment_attempts set status='refunded',failure_reason='oversell',updated_at=now() where id=$1 returning *", [attempt.id])).rows[0];
+    return { attempt, order_id: null, order_access_token: null, refunded_oversell: true };
+  }
+  attempt = (await client.query("update payment_attempts set status='succeeded',provider_charge_id=$2,updated_at=now() where id=$1 returning *", [attempt.id, chargeId])).rows[0];
+  await client.query(`
+    insert into payment_transactions(id,payment_attempt_id,checkout_session_id,status,amount_mxn,currency,provider,provider_charge_id)
+    values($1,$2,$3,'succeeded',$4,$5,$6,$7)
+  `, [randomUUID(), attempt.id, attempt.checkout_session_id, attempt.amount_mxn, attempt.currency, attempt.provider, chargeId]);
+  const createdOrder = await createOrder(client, checkout, attempt);
+  return { attempt, order_id: createdOrder.orderId, order_access_token: createdOrder.orderAccessToken, refunded_oversell: false };
+}
+
 export async function registerCommerce(app: FastifyInstance, context: AppContext): Promise<void> {
   app.post("/cart/sessions", async (request, reply) => {
     const body = asObject(request.body);
@@ -464,38 +517,13 @@ export async function registerCommerce(app: FastifyInstance, context: AppContext
     const client = await context.database.connect();
     try {
       await client.query("begin");
-      let attempt = (await client.query("select * from payment_attempts where id=$1 for update", [request.params.attempt_id])).rows[0];
+      const attempt = (await client.query("select * from payment_attempts where id=$1 for update", [request.params.attempt_id])).rows[0];
       if (!attempt) throw new HttpError(404, "Intento de pago no encontrado");
-      const checkout = await checkoutForPaymentAttempt(context, request, attempt, client);
-      if (attempt.status === "succeeded") {
-        const order = (await client.query("select id from orders where payment_attempt_id=$1", [attempt.id])).rows[0];
-        if (!order) throw new HttpError(409, "El pago no tiene un pedido asociado");
-        const orderAccessToken = await replaceOrderAccessToken(client, order.id);
-        await client.query("commit");
-        return { attempt: attemptResponse(attempt), order_id: order.id, order_access_token: orderAccessToken, refunded_oversell: false };
-      }
-      if (attempt.status !== "pending") throw new HttpError(409, "Intento no confirmable");
-      let chargeId = `mock_charge_${attempt.id}`;
-      if (config.STRIPE_MODE === "live") {
-        const session = await context.stripe.checkout.sessions.retrieve(attempt.provider_payment_intent_id);
-        if (session.payment_status !== "paid") throw new HttpError(409, "El pago aún no está confirmado");
-        chargeId = typeof session.payment_intent === "string" ? session.payment_intent : String((session.payment_intent as any)?.id ?? session.id);
-      }
-      if (!Array.isArray(attempt.metadata?.reservations) || attempt.metadata.reservations_released) {
-        if (config.STRIPE_MODE === "live" && chargeId) await context.stripe.refunds.create({ payment_intent: chargeId }).catch(() => undefined);
-        attempt = (await client.query("update payment_attempts set status='refunded',failure_reason='oversell',updated_at=now() where id=$1 returning *", [attempt.id])).rows[0];
-        await client.query("commit");
-        return { attempt: attemptResponse(attempt), order_id: null, order_access_token: null, refunded_oversell: true };
-      }
-      attempt = (await client.query("update payment_attempts set status='succeeded',provider_charge_id=$2,updated_at=now() where id=$1 returning *", [attempt.id, chargeId])).rows[0];
-      await client.query(`
-        insert into payment_transactions(id,payment_attempt_id,checkout_session_id,status,amount_mxn,currency,provider,provider_charge_id)
-        values($1,$2,$3,'succeeded',$4,$5,$6,$7)
-      `, [randomUUID(), attempt.id, attempt.checkout_session_id, attempt.amount_mxn, attempt.currency, attempt.provider, chargeId]);
-      const createdOrder = await createOrder(client, checkout, attempt);
+      await checkoutForPaymentAttempt(context, request, attempt, client);
+      const result = await confirmPaymentAttemptInTransaction(context, client, attempt.id);
       await client.query("commit");
-      for (const socket of context.sockets) if (socket.readyState === 1) socket.send(JSON.stringify({ type: "sale_confirmed", order_id: createdOrder.orderId, amount_mxn: attempt.amount_mxn }));
-      return { attempt: attemptResponse(attempt), order_id: createdOrder.orderId, order_access_token: createdOrder.orderAccessToken, refunded_oversell: false };
+      if (result.order_id) for (const socket of context.sockets) if (socket.readyState === 1) socket.send(JSON.stringify({ type: "sale_confirmed", order_id: result.order_id, amount_mxn: result.attempt.amount_mxn }));
+      return { ...result, attempt: attemptResponse(result.attempt) };
     } catch (error) {
       await client.query("rollback");
       throw error;

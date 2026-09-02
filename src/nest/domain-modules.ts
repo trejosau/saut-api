@@ -7,6 +7,7 @@ import { registerCatalog } from "../modules/catalog.js";
 import { expirePaymentReservations, registerCommerce } from "../modules/commerce.js";
 import { registerOperations } from "../modules/operations.js";
 import { registerSupportAnalytics } from "../modules/support-analytics.js";
+import { registerWebhooks } from "../modules/webhooks.js";
 import type { AppContext } from "../types.js";
 import { APP_CONTEXT, FASTIFY_SERVER } from "./tokens.js";
 
@@ -114,6 +115,23 @@ class OperationsRouteRegistrar extends RouteRegistrar implements OnModuleInit {
 
 @Module({ providers: [OperationsRouteRegistrar] })
 export class OperationsModule {}
+
+@Injectable()
+class WebhooksRouteRegistrar extends RouteRegistrar implements OnModuleInit {
+  constructor(
+    @Inject(FASTIFY_SERVER) server: FastifyInstance,
+    @Inject(APP_CONTEXT) context: AppContext
+  ) {
+    super(server, context);
+  }
+
+  onModuleInit(): Promise<void> {
+    return registerWebhooks(this.server, this.context);
+  }
+}
+
+@Module({ providers: [WebhooksRouteRegistrar] })
+export class WebhooksModule {}
 
 @Injectable()
 class AssetsRouteRegistrar extends RouteRegistrar implements OnModuleInit {
