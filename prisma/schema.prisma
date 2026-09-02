@@ -96,16 +96,23 @@ model analytics_events {
 }
 
 model assets {
-  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  object_key   String   @unique
-  file_name    String?
-  content_type String
-  visibility   String   @default("private")
-  category     String?
-  size_bytes   BigInt   @default(0)
-  etag         String?
-  created_at   DateTime @default(now()) @db.Timestamptz(6)
-  updated_at   DateTime @default(now()) @db.Timestamptz(6)
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  object_key          String   @unique
+  file_name           String?
+  content_type        String
+  visibility          String   @default("private")
+  category            String?
+  size_bytes          BigInt   @default(0)
+  etag                String?
+  upload_status       String   @default("ready")
+  declared_size_bytes BigInt?
+  upload_expires_at   DateTime? @db.Timestamptz(6)
+  upload_started_at   DateTime? @db.Timestamptz(6)
+  uploaded_at         DateTime? @db.Timestamptz(6)
+  created_at          DateTime @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([upload_status, upload_expires_at, updated_at], map: "assets_upload_cleanup_idx")
 }
 
 model audit_log {
