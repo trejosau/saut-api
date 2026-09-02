@@ -124,17 +124,20 @@ class AssetCleanupWorker implements OnApplicationBootstrap, OnApplicationShutdow
 
   constructor(@Inject(APP_CONTEXT) private readonly context: AppContext) {}
 
+  private runCleanup(): void {
+    if (this.running) return;
+    this.running = cleanupOrphanedAssets(this.context)
+      .then((result) => {
+        if (result.deletedAssets || result.deletedObjects) this.logger.log(result);
+      })
+      .catch((error: unknown) => this.logger.error(error))
+      .finally(() => { this.running = undefined; });
+  }
+
   onApplicationBootstrap(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => {
-      if (this.running) return;
-      this.running = cleanupOrphanedAssets(this.context)
-        .then((result) => {
-          if (result.deletedAssets || result.deletedObjects) this.logger.log(result);
-        })
-        .catch((error: unknown) => this.logger.error(error))
-        .finally(() => { this.running = undefined; });
-    }, config.ASSET_CLEANUP_INTERVAL_SEC * 1000);
+    this.runCleanup();
+    this.timer = setInterval(() => this.runCleanup(), config.ASSET_CLEANUP_INTERVAL_SEC * 1000);
     this.timer.unref();
   }
 
