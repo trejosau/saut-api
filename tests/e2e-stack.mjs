@@ -67,6 +67,13 @@ async function verifySalesMapSocket(ticket) {
 }
 
 await request("GET", "/ready");
+await request("GET", "/live");
+const runtimeMetrics = await request("GET", "/metrics", undefined, {
+  "x-internal-api-key": process.env.AUTH_INTERNAL_API_KEY ?? "dev-internal-auth-key"
+});
+if (runtimeMetrics.process?.rssBytes <= 0 || runtimeMetrics.dbPool?.maxConnections <= 0) {
+  throw new Error("Runtime metrics contract failed");
+}
 await verifySalesMapSocket(await issueAnalyticsTicket());
 const publications = await request("GET", "/catalog/publications");
 if (!Array.isArray(publications) || !publications[0]) throw new Error("Catalog seed missing");

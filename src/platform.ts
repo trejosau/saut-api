@@ -11,7 +11,8 @@ import Stripe from "stripe";
 import { ZodError } from "zod";
 
 import { config } from "./config.js";
-import { database, pingDatabase } from "./db.js";
+import { database } from "./db.js";
+import { runtimeMetrics } from "./observability.js";
 import type { Actor, AppContext } from "./types.js";
 
 export type ApiErrorCode =
@@ -141,9 +142,15 @@ export async function fetchExternal(
   input: string | URL,
   init: RequestInit = {},
   timeoutMs = config.EXTERNAL_REQUEST_TIMEOUT_MS,
+  provider = "external",
 ): Promise<Response> {
+  runtimeMetrics.recordProviderRequest(provider);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   const callerSignal = init.signal;
   const abortCaller = () => controller.abort(callerSignal?.reason);
   if (callerSignal) {
@@ -151,17 +158,35 @@ export async function fetchExternal(
     else callerSignal.addEventListener("abort", abortCaller, { once: true });
   }
   try {
-    return await fetch(input, {
+    const response = await fetch(input, {
       ...init,
       redirect: init.redirect ?? "error",
       signal: controller.signal,
     });
-  } catch {
+    if (!response.ok) runtimeMetrics.recordProviderError(provider, undefined, response.status);
+    return response;
+  } catch (error) {
+    runtimeMetrics.recordProviderError(provider, timedOut ? new DOMException("The operation timed out", "AbortError") : error);
     throw new HttpError(503, "Proveedor externo no disponible", undefined, "SERVICE_UNAVAILABLE");
   } finally {
     clearTimeout(timer);
     callerSignal?.removeEventListener("abort", abortCaller);
   }
+}
+
+/** Records provider SDK calls while preserving their existing error contract. */
+export async function withProviderMetrics<T>(provider: string, operation: () => Promise<T>): Promise<T> {
+  runtimeMetrics.recordProviderRequest(provider);
+  try {
+    return await operation();
+  } catch (error) {
+    runtimeMetrics.recordProviderError(provider, error);
+    throw error;
+  }
+}
+
+export function recordProviderFailure(provider: string, error?: unknown): void {
+  runtimeMetrics.recordProviderError(provider, error);
 }
 
 const tokenSecret = new TextEncoder().encode(config.AUTH_TOKEN_SECRET);
@@ -397,6 +422,12 @@ export async function buildFastifyServer(context: AppContext): Promise<FastifyIn
   });
   try {
     app.context = context;
+    app.addHook("onRequest", async (request) => {
+      runtimeMetrics.startRequest(request);
+    });
+    app.addHook("onResponse", async (request, reply) => {
+      runtimeMetrics.finishRequest(request, reply.statusCode);
+    });
     app.addHook("onSend", async (request, reply, payload) => {
       reply.header("x-request-id", request.id);
       reply.header("x-content-type-options", "nosniff");
@@ -422,6 +453,9 @@ export async function buildFastifyServer(context: AppContext): Promise<FastifyIn
       if ((path.startsWith("/internal/") || path.startsWith("/notifications/")) && request.headers["x-internal-api-key"] !== config.AUTH_INTERNAL_API_KEY) {
         throw new HttpError(401, "API key interna inválida");
       }
+      if (path === "/metrics" && request.headers["x-internal-api-key"] !== config.AUTH_INTERNAL_API_KEY) {
+        throw new HttpError(401, "API key interna inválida");
+      }
     });
     return app;
   } catch (error) {
@@ -431,10 +465,14 @@ export async function buildFastifyServer(context: AppContext): Promise<FastifyIn
 }
 
 export async function readiness(context: AppContext): Promise<{ status: string; service: string; version: string }> {
-  await pingDatabase();
-  if (context.redis.status === "ready") await context.redis.ping();
-  await context.s3.send(new HeadBucketCommand({ Bucket: config.S3_BUCKET }));
-  return { status: "ready", service: "saut-api", version: "1.0.0" };
+  try {
+    await context.database.ping();
+    if (context.redis.status === "ready") await context.redis.ping();
+    await context.s3.send(new HeadBucketCommand({ Bucket: config.S3_BUCKET }));
+    return { status: "ready", service: "saut-api", version: "1.0.0" };
+  } catch {
+    throw new HttpError(503, "Servicio no listo", undefined, "SERVICE_UNAVAILABLE");
+  }
 }
 
 export { DeleteObjectCommand, GetObjectCommand, PutObjectCommand };
