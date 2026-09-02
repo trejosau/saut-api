@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const domainTables = [
-  "accounts", "account_identities", "login_challenges", "sessions", "auth_events", "roles", "permissions",
+  "accounts", "account_identities", "login_challenges", "sessions", "auth_events", "mfa_policy", "account_mfa", "recovery_codes", "roles", "permissions",
   "role_permissions", "account_roles", "account_permission_overrides", "audit_log", "designs", "design_variants",
   "informative_images", "publications", "publication_mockups", "collections_sets", "collection_set_items", "drops",
   "drop_items", "season_config", "carts", "cart_items", "checkout_sessions", "payment_attempts",
@@ -16,10 +16,17 @@ const domainTables = [
 ] as const;
 
 describe("consolidated schema", () => {
-  it("contains all 49 migrated tables plus persistent assets", async () => {
+  it("contains the consolidated schema plus advanced auth tables", async () => {
     const sql = await readFile(resolve(process.cwd(), "migrations/0001_consolidated_schema.sql"), "utf8");
-    expect(domainTables).toHaveLength(50);
-    for (const table of domainTables) expect(sql).toContain(`CREATE TABLE IF NOT EXISTS ${table}`);
+    expect(domainTables).toHaveLength(53);
+    for (const table of domainTables) {
+      if (["mfa_policy", "account_mfa", "recovery_codes"].includes(table)) continue;
+      expect(sql).toContain(`CREATE TABLE IF NOT EXISTS ${table}`);
+    }
+    const advancedAuthSql = await readFile(resolve(process.cwd(), "migrations/0004_advanced_auth_core.sql"), "utf8");
+    for (const table of ["mfa_policy", "account_mfa", "recovery_codes"]) {
+      expect(advancedAuthSql).toContain(`CREATE TABLE IF NOT EXISTS ${table}`);
+    }
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS migration_runs");
   });
 });

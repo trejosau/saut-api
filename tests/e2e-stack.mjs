@@ -2,6 +2,8 @@
 
 import { WebSocket } from "ws";
 import { clearTimeout, setTimeout } from "node:timers";
+import { createHmac } from "node:crypto";
+import { Buffer } from "node:buffer";
 
 const base = process.env.API_BASE_URL ?? "http://localhost:8080";
 
@@ -41,6 +43,44 @@ async function issueAnalyticsTicket() {
   return ticket.ticket;
 }
 
+function totpCode(secret) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let buffer = 0;
+  let bits = 0;
+  const bytes = [];
+  for (const character of secret) {
+    buffer = (buffer << 5) | alphabet.indexOf(character);
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((buffer >> bits) & 255);
+    }
+  }
+  const counter = Math.floor(Date.now() / 30_000);
+  const message = Buffer.alloc(8);
+  message.writeBigUInt64BE(BigInt(counter));
+  const digest = createHmac("sha1", Buffer.from(bytes)).update(message).digest();
+  const offset = digest[digest.length - 1] & 0x0f;
+  const binary = ((digest[offset] & 0x7f) << 24) | (digest[offset + 1] << 16) | (digest[offset + 2] << 8) | digest[offset + 3];
+  return String(binary % 1_000_000).padStart(6, "0");
+}
+
+async function verifyAdvancedAuth() {
+  const email = `e2e-mfa-${Date.now()}@saut.local`;
+  const started = await request("POST", "/auth/email/start", { email });
+  const session = await request("POST", "/auth/email/verify", { email, code: started.code });
+  const headers = { authorization: `Bearer ${session.access_token}` };
+  const setup = await request("POST", "/auth/mfa/totp/setup", {}, headers);
+  const enabled = await request("POST", "/auth/mfa/totp/verify", { code: totpCode(setup.secret) }, headers);
+  if (!enabled.recovery_codes?.length) throw new Error("MFA recovery codes missing");
+  const status = await request("GET", "/auth/mfa/status", undefined, headers);
+  if (!status.enabled || status.recovery_codes_remaining !== enabled.recovery_codes.length) throw new Error("MFA status contract failed");
+  const challenge = await request("POST", "/auth/step-up/start", { purpose: "e2e-check" }, headers);
+  const steppedUp = await request("POST", "/auth/step-up/verify", { challenge_id: challenge.challenge_id, recovery_code: enabled.recovery_codes[0] }, headers);
+  if (!steppedUp.verified || steppedUp.method !== "recovery_code") throw new Error("Step-up contract failed");
+  await request("POST", "/auth/mfa/disable", { recovery_code: enabled.recovery_codes[1] }, headers);
+}
+
 async function verifySalesMapSocket(ticket) {
   const socketUrl = `${base.replace(/^http/, "ws")}/ws/map?ticket=${encodeURIComponent(ticket)}`;
   const message = await new Promise((resolve, reject) => {
@@ -67,6 +107,7 @@ async function verifySalesMapSocket(ticket) {
 }
 
 await request("GET", "/ready");
+await verifyAdvancedAuth();
 await verifySalesMapSocket(await issueAnalyticsTicket());
 const publications = await request("GET", "/catalog/publications");
 if (!Array.isArray(publications) || !publications[0]) throw new Error("Catalog seed missing");
