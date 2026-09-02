@@ -256,10 +256,11 @@ export async function registerAuth(app: FastifyInstance, context: AppContext): P
     const email = normalizeEmail(emailSchema.parse(body.email));
     const code = z.string().length(6).parse(body.code ?? body.token);
     const challenge = await context.database.query<any>(`
-      select * from login_challenges where email_normalized = $1 and consumed_at is null order by created_at desc limit 1
+      select * from login_challenges where email_normalized = $1 and consumed_at is null
+        and expires_at > now() order by created_at desc limit 1
     `, [email]);
     const row = challenge.rows[0];
-    if (!row || new Date(row.expires_at).getTime() < Date.now()) throw new HttpError(401, "Código inválido o expirado");
+    if (!row) throw new HttpError(401, "Código inválido o expirado");
     if (row.attempts >= row.max_attempts) throw new HttpError(429, "Demasiados intentos");
     if (!secureEqual(row.code_hash, hmac(`${row.id}:${code}`))) {
       await context.database.query("update login_challenges set attempts = attempts + 1 where id = $1", [row.id]);
