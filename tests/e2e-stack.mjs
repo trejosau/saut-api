@@ -59,6 +59,9 @@ const publications = await request("GET", "/catalog/publications");
 if (!Array.isArray(publications) || !publications[0]) throw new Error("Catalog seed missing");
 
 const cart = await request("POST", "/cart/sessions", {});
+if (!cart.cart_access_token) throw new Error("Cart capability missing");
+const cartHeaders = { "x-cart-access-token": cart.cart_access_token };
+await expectStatus("GET", `/cart/sessions/${cart.id}`, 403);
 const cartWithItem = await request("POST", `/cart/sessions/${cart.id}/items/predesigned`, {
   publication_slug: publications[0].slug,
   publication_id: publications[0].id,
@@ -70,7 +73,7 @@ const cartWithItem = await request("POST", `/cart/sessions/${cart.id}/items/pred
   fit: "",
   quantity: 1,
   unit_price_mxn: 1
-});
+}, cartHeaders);
 if (Number(cartWithItem.items[0]?.unit_price_mxn) !== Number(publications[0].price_mxn)) {
   throw new Error("Server accepted a client-controlled product price");
 }
@@ -79,21 +82,33 @@ const checkout = await request("POST", "/checkout/sessions", {
   email: "e2e@saut.local",
   phone: "8710000000",
   address: { line1: "Av. Juárez 100", city: "Torreon", state: "Coahuila", postal_code: "27000", country: "MX" }
-});
-const attempt = await request("POST", "/payments/attempts", { checkout_session_id: checkout.id });
-const confirmed = await request("POST", `/payments/attempts/${attempt.id}/confirm`, {});
+}, cartHeaders);
+await expectStatus("GET", `/checkout/sessions/${checkout.id}`, 403);
+const checkoutRead = await request("GET", `/checkout/sessions/${checkout.id}`, undefined, cartHeaders);
+if (checkoutRead.email !== "e2e@saut.local") throw new Error("Checkout capability did not authorize its owner");
+const attempt = await request("POST", "/payments/attempts", { checkout_session_id: checkout.id }, cartHeaders);
+if (attempt.provider === "stripe" && !attempt.checkout_url) throw new Error("Hosted Stripe attempt is missing its checkout URL");
+if ("client_secret" in attempt) throw new Error("Payment attempt exposed its client secret");
+await expectStatus("GET", `/payments/attempts/${attempt.id}`, 403);
+const confirmed = await request("POST", `/payments/attempts/${attempt.id}/confirm`, {}, cartHeaders);
 if (!confirmed.order_id || !confirmed.order_access_token || confirmed.refunded_oversell) throw new Error("Payment/order flow failed");
 await expectStatus("GET", `/orders/${confirmed.order_id}`, 403);
-const order = await request("GET", `/orders/${confirmed.order_id}`, undefined, {
+const initialOrder = await request("GET", `/orders/${confirmed.order_id}`, undefined, {
   "x-order-access-token": confirmed.order_access_token
 });
-if (order.id !== confirmed.order_id || order.items.length !== 1) throw new Error("Order contract failed");
+if (initialOrder.id !== confirmed.order_id || initialOrder.items.length !== 1) throw new Error("Order contract failed");
+const retry = await request("POST", `/payments/attempts/${attempt.id}/confirm`, {}, cartHeaders);
+if (!retry.order_access_token || retry.order_id !== confirmed.order_id) throw new Error("Idempotent confirmation did not recover order access");
+const order = await request("GET", `/orders/${confirmed.order_id}`, undefined, {
+  "x-order-access-token": retry.order_access_token
+});
+if (order.id !== confirmed.order_id || order.items.length !== 1) throw new Error("Retried order contract failed");
 await expectStatus("PATCH", `/shipping/local/orders/${confirmed.order_id}/address`, 403, {
   address: { line1: "Calle sin autorización 1" }
 });
 const addressChange = await request("PATCH", `/shipping/local/orders/${confirmed.order_id}/address`, {
   address: { line1: "Av. Juárez 101", city: "Torreon", state: "Coahuila", postal_code: "27000", country: "MX" }
-}, { "x-order-access-token": confirmed.order_access_token });
+}, { "x-order-access-token": retry.order_access_token });
 if (addressChange.address?.line1 !== "Av. Juárez 101") throw new Error("Authorized local address change failed");
 
 if (process.env.ASSETS_INTERNAL_API_KEY) {

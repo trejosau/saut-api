@@ -12,22 +12,74 @@ function cartItem(row: any): any {
   return { ...row, line_total_mxn: Number(row.unit_price_mxn) * Number(row.quantity) };
 }
 
-async function cartResponse(context: AppContext, id: string, client: any = context.database): Promise<any> {
-  const cart = (await client.query("select * from carts where id=$1", [id])).rows[0];
-  if (!cart) throw new HttpError(404, "Carrito no encontrado");
-  const items: any[] = (await client.query("select * from cart_items where cart_id=$1 order by created_at", [id])).rows.map(cartItem);
-  return { ...cart, total_items: items.reduce((sum, item) => sum + Number(item.quantity), 0), subtotal_mxn: items.reduce((sum, item) => sum + item.line_total_mxn, 0), items };
+function cartAccessToken(request: FastifyRequest): string | null {
+  const value = request.headers["x-cart-access-token"];
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-async function checkoutResponse(context: AppContext, id: string, client: any = context.database): Promise<any> {
+async function authorizeCartAccess(context: AppContext, request: FastifyRequest, cart: any): Promise<void> {
+  if (request.headers["x-internal-api-key"] === config.AUTH_INTERNAL_API_KEY) return;
+
+  const accessToken = cartAccessToken(request);
+  if (
+    accessToken &&
+    typeof cart.cart_access_token_hash === "string" &&
+    secureEqual(sha256(accessToken), cart.cart_access_token_hash)
+  ) {
+    return;
+  }
+
+  const token = bearerToken(request);
+  if (token && cart.account_id) {
+    try {
+      const actor = await verifyAccessToken(token);
+      if (actor.accountId === cart.account_id) return;
+    } catch {
+      // A stale bearer token must not change the cart authorization result.
+    }
+  }
+
+  throw new HttpError(403, "No tienes acceso a este carrito");
+}
+
+async function cartForAccess(context: AppContext, request: FastifyRequest, id: string, client: any = context.database): Promise<any> {
+  const cart = (await client.query("select * from carts where id=$1", [id])).rows[0];
+  if (!cart) throw new HttpError(404, "Carrito no encontrado");
+  await authorizeCartAccess(context, request, cart);
+  return cart;
+}
+
+function cartSummary(cart: any, items: any[]): any {
+  const responseCart = { ...cart };
+  delete responseCart.cart_access_token_hash;
+  return { ...responseCart, total_items: items.reduce((sum, item) => sum + Number(item.quantity), 0), subtotal_mxn: items.reduce((sum, item) => sum + item.line_total_mxn, 0), items };
+}
+
+async function cartResponse(context: AppContext, request: FastifyRequest, id: string, client: any = context.database): Promise<any> {
+  const cart = await cartForAccess(context, request, id, client);
+  const items: any[] = (await client.query("select * from cart_items where cart_id=$1 order by created_at", [id])).rows.map(cartItem);
+  return cartSummary(cart, items);
+}
+
+async function checkoutResponse(context: AppContext, request: FastifyRequest, id: string, client: any = context.database): Promise<any> {
   const checkout = (await client.query("select * from checkout_sessions where id=$1", [id])).rows[0];
   if (!checkout) throw new HttpError(404, "Checkout no encontrado");
-  const cart = await cartResponse(context, checkout.cart_id, client);
+  const cart = await cartResponse(context, request, checkout.cart_id, client);
   return { ...checkout, shipping_quotes: checkout.shipping_quotes ?? [], items: cart.items };
 }
 
+async function checkoutForPaymentAttempt(context: AppContext, request: FastifyRequest, attempt: any, client: any = context.database): Promise<any> {
+  const checkout = (await client.query("select * from checkout_sessions where id=$1", [attempt.checkout_session_id])).rows[0];
+  if (!checkout) throw new HttpError(404, "Checkout no encontrado");
+  await cartForAccess(context, request, checkout.cart_id, client);
+  return checkout;
+}
+
 function attemptResponse(row: any): any {
-  return { ...row, checkout_url: row.metadata?.checkout_url ?? null };
+  const response = { ...row };
+  delete response.metadata;
+  delete response.client_secret;
+  return { ...response, checkout_url: row.metadata?.checkout_url ?? null };
 }
 
 type CreatedOrder = {
@@ -105,9 +157,23 @@ async function releaseReservations(client: pg.PoolClient, attempt: any, reason: 
   await client.query("update payment_attempts set metadata=$2,updated_at=now() where id=$1", [attempt.id, metadata]);
 }
 
+async function replaceOrderAccessToken(client: pg.PoolClient, orderId: string): Promise<string> {
+  const orderAccessToken = randomToken(32);
+  await client.query(
+    "update orders set customer_access_token_hash=$2,updated_at=now() where id=$1",
+    [orderId, sha256(orderAccessToken)]
+  );
+  return orderAccessToken;
+}
+
 async function createOrder(client: pg.PoolClient, checkout: any, attempt: any): Promise<CreatedOrder> {
   const existing = await client.query<{ id: string }>("select id from orders where checkout_session_id=$1", [checkout.id]);
-  if (existing.rows[0]) return { orderId: existing.rows[0].id, orderAccessToken: null };
+  if (existing.rows[0]) {
+    return {
+      orderId: existing.rows[0].id,
+      orderAccessToken: await replaceOrderAccessToken(client, existing.rows[0].id)
+    };
+  }
   const items = (await client.query("select * from cart_items where cart_id=$1 order by created_at", [checkout.cart_id])).rows;
   const primaryDrop = items.find((item) => item.drop_id)?.drop_id ?? null;
   let dropNumber: number | null = null;
@@ -200,12 +266,22 @@ async function orderResponse(context: AppContext, request: FastifyRequest, where
   return { ...responseOrder, email: order.customer_email, phone: order.customer_phone, drop_label: order.drop_number ? `#${order.drop_number}` : null, items };
 }
 
-async function stripeCheckout(context: AppContext, checkout: any, returnOrigin?: string): Promise<any> {
-  const origin = typeof returnOrigin === "string" && /^https?:\/\//.test(returnOrigin) ? returnOrigin : "http://localhost:4200";
+async function stripeCheckout(context: AppContext, checkout: any, attemptId: string, returnOrigin?: string): Promise<any> {
+  let origin = config.corsOrigins[0] ?? "http://localhost:4200";
+  if (typeof returnOrigin === "string") {
+    try {
+      const candidate = new URL(returnOrigin).origin;
+      if (config.corsOrigins.includes(candidate)) origin = candidate;
+    } catch {
+      // Use the configured frontend origin when a caller supplies an invalid return target.
+    }
+  }
+  const checkoutPath = `/checkout?payment=success&payment_attempt=${encodeURIComponent(attemptId)}&checkout_id=${encodeURIComponent(checkout.id)}&session_id={CHECKOUT_SESSION_ID}`;
+  const cancelPath = `/checkout?checkout=cancelled&payment_attempt=${encodeURIComponent(attemptId)}&checkout_id=${encodeURIComponent(checkout.id)}`;
   return context.stripe.checkout.sessions.create({
     mode: "payment",
-    success_url: `${origin}/checkout?payment=success&session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${origin}/checkout?payment=cancelled`,
+    success_url: `${origin}${checkoutPath}`,
+    cancel_url: `${origin}${cancelPath}`,
     customer_email: checkout.email,
     line_items: [{ quantity: 1, price_data: { currency: "mxn", unit_amount: Number(checkout.total_mxn) * 100, product_data: { name: `Pedido SAUT ${checkout.id}` } } }],
     metadata: { checkout_session_id: checkout.id }
@@ -223,10 +299,24 @@ export async function expirePaymentReservations(context: AppContext): Promise<vo
 
 export async function registerCommerce(app: FastifyInstance, context: AppContext): Promise<void> {
   app.post("/cart/sessions", async (request, reply) => {
-    const body=asObject(request.body);const id=randomUUID();await context.database.query("insert into carts(id,status,guest_session_id,account_id) values($1,'active',$2,$3)",[id,body.guest_session_id??null,body.account_id??null]);reply.status(201);return cartResponse(context,id);
+    const body = asObject(request.body);
+    const bearer = bearerToken(request);
+    const accountId = bearer ? (await verifyAccessToken(bearer)).accountId : null;
+    const guestSessionId = typeof body.guest_session_id === "string"
+      ? body.guest_session_id.trim().slice(0, 128) || null
+      : null;
+    const id = randomUUID();
+    const accessToken = randomToken(32);
+    const cart = (await context.database.query(`
+      insert into carts(id,status,guest_session_id,account_id,cart_access_token_hash)
+      values($1,'active',$2,$3,$4) returning *
+    `, [id, guestSessionId, accountId, sha256(accessToken)])).rows[0];
+    reply.status(201);
+    return { ...cartSummary(cart, []), cart_access_token: accessToken };
   });
-  app.get<{Params:{cart_id:string}}>("/cart/sessions/:cart_id",async(request)=>cartResponse(context,request.params.cart_id));
+  app.get<{Params:{cart_id:string}}>("/cart/sessions/:cart_id",async(request)=>cartResponse(context,request,request.params.cart_id));
   app.post<{Params:{cart_id:string}}>("/cart/sessions/:cart_id/items/predesigned",async(request,reply)=>{
+    await cartForAccess(context,request,request.params.cart_id);
     const body=asObject(request.body);
     const publication=(await context.database.query<any>(`
       select * from publications
@@ -246,32 +336,165 @@ export async function registerCommerce(app: FastifyInstance, context: AppContext
     const drop=(await context.database.query("select d.* from drops d join drop_items di on di.drop_id=d.id where di.publication_id=$1 and d.status='active' order by d.starts_at desc nulls last limit 1",[publication.id])).rows[0];
     await context.database.query(`insert into cart_items(id,cart_id,item_type,publication_id,publication_slug,design_variant_id,garment_type,garment_model,color,size,grammage_g,fit,quantity,unit_price_mxn,drop_id,drop_total_limit,meta)
       values($1,$2,'predesigned',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,[randomUUID(),request.params.cart_id,publication.id,publication.slug,designVariantId,publication.garment_type,publication.garment_model??"",color,size,grammage,fit,quantity,Number(publication.price_mxn),drop?.id??null,drop?.capacity_total??null,body.meta??null]);
-    reply.status(201);return cartResponse(context,request.params.cart_id);
+    reply.status(201);return cartResponse(context,request,request.params.cart_id);
   });
   app.post<{Params:{cart_id:string}}>("/cart/sessions/:cart_id/items/customized",async(request,reply)=>{
+    await cartForAccess(context,request,request.params.cart_id);
     const body=asObject(request.body);const front=Array.isArray(body.front_assets)?body.front_assets:[];const back=Array.isArray(body.back_assets)?body.back_assets:[];
     const improveQuality=Boolean(body.improve_quality);
     const unitPrice=await customizerUnitPrice(context,front.length+back.length,improveQuality);
     const quantity=boundedPositiveInteger(body.quantity,"quantity",25);
     await context.database.query(`insert into cart_items(id,cart_id,item_type,garment_type,garment_model,color,size,grammage_g,fit,quantity,unit_price_mxn,custom_front,custom_back,custom_note,improve_quality,meta)
       values($1,$2,'customized',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,[randomUUID(),request.params.cart_id,requiredText(body.garment_type,"garment_type",64),optionalText(body.garment_model,"garment_model",64),requiredText(body.color,"color",64),requiredText(body.size,"size",32),boundedPositiveInteger(body.grammage_g,"grammage_g",1_000),optionalText(body.fit,"fit",64),quantity,unitPrice,JSON.stringify(front),JSON.stringify(back),body.note??null,improveQuality,body.meta??null]);
-    reply.status(201);return cartResponse(context,request.params.cart_id);
+    reply.status(201);return cartResponse(context,request,request.params.cart_id);
   });
-  app.delete<{Params:{cart_id:string;item_id:string}}>("/cart/sessions/:cart_id/items/:item_id",async(request)=>{await context.database.query("delete from cart_items where id=$1 and cart_id=$2",[request.params.item_id,request.params.cart_id]);return cartResponse(context,request.params.cart_id);});
+  app.delete<{Params:{cart_id:string;item_id:string}}>("/cart/sessions/:cart_id/items/:item_id",async(request)=>{await cartForAccess(context,request,request.params.cart_id);await context.database.query("delete from cart_items where id=$1 and cart_id=$2",[request.params.item_id,request.params.cart_id]);return cartResponse(context,request,request.params.cart_id);});
 
-  app.post("/checkout/sessions",async(request,reply)=>{const body=asObject(request.body);const cart=await cartResponse(context,String(body.cart_id));if(cart.items.length===0)throw new HttpError(400,"El carrito está vacío");const local=String(body.address?.city??"").toLowerCase().includes("torre");const quotes=local?[{quote_id:"local-standard",provider:"saut-local",service:"local",price_mxn:config.LOCAL_SHIPPING_COST_MXN,eta_days:1}]:await quoteNational(asObject(body.address),String(body.cart_id));const selected=quotes.find(q=>q.quote_id===body.selected_quote_id)??quotes[0]!;const id=randomUUID();await context.database.query(`insert into checkout_sessions(id,cart_id,status,email,phone,address,shipping_method,shipping_quote_id,shipping_provider,shipping_service,shipping_cost_mxn,shipping_quotes,subtotal_mxn,total_mxn,currency)
-    values($1,$2,'pending',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'MXN')`,[id,cart.id,body.email,body.phone,body.address,local?"local":"national",selected.quote_id,selected.provider,selected.service,selected.price_mxn,JSON.stringify(quotes),cart.subtotal_mxn,cart.subtotal_mxn+selected.price_mxn]);reply.status(201);return checkoutResponse(context,id);});
-  app.get<{Params:{checkout_id:string}}>("/checkout/sessions/:checkout_id",async(request)=>checkoutResponse(context,request.params.checkout_id));
-  app.post<{Params:{checkout_id:string}}>("/checkout/sessions/:checkout_id/shipping/select",async(request)=>{const body=asObject(request.body);const row=(await context.database.query("select shipping_quotes from checkout_sessions where id=$1",[request.params.checkout_id])).rows[0];if(!row)throw new HttpError(404,"Checkout no encontrado");const quote=(row.shipping_quotes??[]).find((item:any)=>item.quote_id===body.quote_id);if(!quote)throw new HttpError(400,"Cotización no encontrada");await context.database.query("update checkout_sessions set shipping_quote_id=$2,shipping_provider=$3,shipping_service=$4,shipping_cost_mxn=$5,total_mxn=subtotal_mxn+$5,updated_at=now() where id=$1",[request.params.checkout_id,quote.quote_id,quote.provider,quote.service,quote.price_mxn]);return checkoutResponse(context,request.params.checkout_id);});
-  app.get<{Params:{checkout_id:string}}>("/internal/checkout/sessions/:checkout_id/payable",async(request)=>checkoutResponse(context,request.params.checkout_id));
-  app.post<{Params:{checkout_id:string}}>("/internal/checkout/sessions/:checkout_id/mark-paid",async(request)=>{const body=asObject(request.body);await context.database.query("update checkout_sessions set status='paid',paid_at=now(),payment_attempt_id=$2,order_id=$3,updated_at=now() where id=$1",[request.params.checkout_id,body.payment_attempt_id,body.order_id??null]);return checkoutResponse(context,request.params.checkout_id);});
+  app.post("/checkout/sessions", async (request, reply) => {
+    const body = asObject(request.body);
+    const cart = await cartResponse(context, request, String(body.cart_id));
+    if (cart.items.length === 0) throw new HttpError(400, "El carrito está vacío");
+    const local = String(body.address?.city ?? "").toLowerCase().includes("torre");
+    const quotes = local
+      ? [{ quote_id: "local-standard", provider: "saut-local", service: "local", price_mxn: config.LOCAL_SHIPPING_COST_MXN, eta_days: 1 }]
+      : await quoteNational(asObject(body.address), String(body.cart_id));
+    const selected = quotes.find((quote) => quote.quote_id === body.selected_quote_id) ?? quotes[0]!;
+    const id = randomUUID();
+    await context.database.query(`
+      insert into checkout_sessions(id,cart_id,status,email,phone,address,shipping_method,shipping_quote_id,shipping_provider,shipping_service,shipping_cost_mxn,shipping_quotes,subtotal_mxn,total_mxn,currency)
+      values($1,$2,'pending',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'MXN')
+    `, [id, cart.id, body.email, body.phone, body.address, local ? "local" : "national", selected.quote_id, selected.provider, selected.service, selected.price_mxn, JSON.stringify(quotes), cart.subtotal_mxn, cart.subtotal_mxn + selected.price_mxn]);
+    reply.status(201);
+    return checkoutResponse(context, request, id);
+  });
+  app.get<{Params:{checkout_id:string}}>("/checkout/sessions/:checkout_id", async (request) => checkoutResponse(context, request, request.params.checkout_id));
+  app.post<{Params:{checkout_id:string}}>("/checkout/sessions/:checkout_id/shipping/select", async (request) => {
+    const checkout = await checkoutResponse(context, request, request.params.checkout_id);
+    const quote = (checkout.shipping_quotes ?? []).find((item: any) => item.quote_id === asObject(request.body).quote_id);
+    if (!quote) throw new HttpError(400, "Cotización no encontrada");
+    await context.database.query(
+      "update checkout_sessions set shipping_quote_id=$2,shipping_provider=$3,shipping_service=$4,shipping_cost_mxn=$5,total_mxn=subtotal_mxn+$5,updated_at=now() where id=$1",
+      [request.params.checkout_id, quote.quote_id, quote.provider, quote.service, quote.price_mxn]
+    );
+    return checkoutResponse(context, request, request.params.checkout_id);
+  });
+  app.get<{Params:{checkout_id:string}}>("/internal/checkout/sessions/:checkout_id/payable", async (request) => checkoutResponse(context, request, request.params.checkout_id));
+  app.post<{Params:{checkout_id:string}}>("/internal/checkout/sessions/:checkout_id/mark-paid", async (request) => {
+    const body = asObject(request.body);
+    await context.database.query("update checkout_sessions set status='paid',paid_at=now(),payment_attempt_id=$2,order_id=$3,updated_at=now() where id=$1", [request.params.checkout_id, body.payment_attempt_id, body.order_id ?? null]);
+    return checkoutResponse(context, request, request.params.checkout_id);
+  });
 
-  app.post("/payments/attempts",async(request,reply)=>{const body=asObject(request.body);const client=await context.database.connect();try{await client.query("begin");const checkout=(await client.query("select * from checkout_sessions where id=$1 for update",[body.checkout_session_id])).rows[0];if(!checkout)throw new HttpError(404,"Checkout no encontrado");if(checkout.status!=="pending")throw new HttpError(409,"Checkout no disponible para pago");const items=(await client.query("select * from cart_items where cart_id=$1",[checkout.cart_id])).rows;const id=randomUUID();const reservations=await reserveStock(client,items,id);let providerId=`mock_${id}`;let clientSecret=`mock_secret_${id}`;let checkoutUrl:null|string=null;if(config.STRIPE_MODE==="live"){const stripeSession=await stripeCheckout(context,checkout,body.return_origin);providerId=stripeSession.id;clientSecret=String(stripeSession.client_secret??"");checkoutUrl=stripeSession.url;}const metadata={reservations,checkout_url:checkoutUrl,reservations_released:false};const attempt=(await client.query(`insert into payment_attempts(id,checkout_session_id,status,amount_mxn,currency,provider,provider_payment_intent_id,client_secret,metadata)
-      values($1,$2,'pending',$3,$4,'stripe',$5,$6,$7) returning *`,[id,checkout.id,checkout.total_mxn,checkout.currency,providerId,clientSecret,metadata])).rows[0];await client.query("update checkout_sessions set payment_attempt_id=$2,updated_at=now() where id=$1",[checkout.id,id]);await client.query("commit");reply.status(201);return attemptResponse(attempt);}catch(error){await client.query("rollback");throw error;}finally{client.release();}});
-  app.get<{Params:{attempt_id:string}}>("/payments/attempts/:attempt_id",async(request)=>{const row=(await context.database.query("select * from payment_attempts where id=$1",[request.params.attempt_id])).rows[0];if(!row)throw new HttpError(404,"Intento de pago no encontrado");return attemptResponse(row);});
-  app.post<{Params:{attempt_id:string}}>("/payments/attempts/:attempt_id/cancel",async(request)=>{const client=await context.database.connect();try{await client.query("begin");const attempt=(await client.query("select * from payment_attempts where id=$1 for update",[request.params.attempt_id])).rows[0];if(!attempt)throw new HttpError(404,"Intento de pago no encontrado");if(attempt.status==="pending"){if(config.STRIPE_MODE==="live"&&attempt.provider_payment_intent_id)await context.stripe.checkout.sessions.expire(attempt.provider_payment_intent_id).catch(()=>undefined);await releaseReservations(client,attempt,"cancelled");}const row=(await client.query("update payment_attempts set status='cancelled',updated_at=now() where id=$1 returning *",[attempt.id])).rows[0];await client.query("commit");return attemptResponse(row);}catch(error){await client.query("rollback");throw error;}finally{client.release();}});
-  app.post<{Params:{attempt_id:string}}>("/payments/attempts/:attempt_id/confirm",async(request)=>{const client=await context.database.connect();try{await client.query("begin");let attempt=(await client.query("select * from payment_attempts where id=$1 for update",[request.params.attempt_id])).rows[0];if(!attempt)throw new HttpError(404,"Intento de pago no encontrado");if(attempt.status==="succeeded"){const order=(await client.query("select id from orders where payment_attempt_id=$1",[attempt.id])).rows[0];await client.query("commit");return{attempt:attemptResponse(attempt),order_id:order?.id??null,order_access_token:null,refunded_oversell:false};}if(attempt.status!=="pending")throw new HttpError(409,"Intento no confirmable");let chargeId=`mock_charge_${attempt.id}`;if(config.STRIPE_MODE==="live"){const session=await context.stripe.checkout.sessions.retrieve(attempt.provider_payment_intent_id);if(session.payment_status!=="paid")throw new HttpError(409,"El pago aún no está confirmado");chargeId=typeof session.payment_intent==="string"?session.payment_intent:String((session.payment_intent as any)?.id??session.id);}if(!Array.isArray(attempt.metadata?.reservations)||attempt.metadata.reservations_released){if(config.STRIPE_MODE==="live"&&chargeId)await context.stripe.refunds.create({payment_intent:chargeId}).catch(()=>undefined);attempt=(await client.query("update payment_attempts set status='refunded',failure_reason='oversell',updated_at=now() where id=$1 returning *",[attempt.id])).rows[0];await client.query("commit");return{attempt:attemptResponse(attempt),order_id:null,order_access_token:null,refunded_oversell:true};}attempt=(await client.query("update payment_attempts set status='succeeded',provider_charge_id=$2,updated_at=now() where id=$1 returning *",[attempt.id,chargeId])).rows[0];await client.query(`insert into payment_transactions(id,payment_attempt_id,checkout_session_id,status,amount_mxn,currency,provider,provider_charge_id)
-      values($1,$2,$3,'succeeded',$4,$5,$6,$7)`,[randomUUID(),attempt.id,attempt.checkout_session_id,attempt.amount_mxn,attempt.currency,attempt.provider,chargeId]);const checkout=(await client.query("select * from checkout_sessions where id=$1 for update",[attempt.checkout_session_id])).rows[0];const createdOrder=await createOrder(client,checkout,attempt);await client.query("commit");for(const socket of context.sockets)if(socket.readyState===1)socket.send(JSON.stringify({type:"sale_confirmed",order_id:createdOrder.orderId,amount_mxn:attempt.amount_mxn}));return{attempt:attemptResponse(attempt),order_id:createdOrder.orderId,order_access_token:createdOrder.orderAccessToken,refunded_oversell:false};}catch(error){await client.query("rollback");throw error;}finally{client.release();}});
+  app.post("/payments/attempts", async (request, reply) => {
+    const body = asObject(request.body);
+    const client = await context.database.connect();
+    try {
+      await client.query("begin");
+      const checkout = (await client.query("select * from checkout_sessions where id=$1 for update", [body.checkout_session_id])).rows[0];
+      if (!checkout) throw new HttpError(404, "Checkout no encontrado");
+      await cartForAccess(context, request, checkout.cart_id, client);
+      if (checkout.status !== "pending") throw new HttpError(409, "Checkout no disponible para pago");
+      const items = (await client.query("select * from cart_items where cart_id=$1", [checkout.cart_id])).rows;
+      const id = randomUUID();
+      const reservations = await reserveStock(client, items, id);
+      const provider = config.STRIPE_MODE === "live" ? "stripe" : "mock";
+      let providerId = `mock_${id}`;
+      let clientSecret = `mock_secret_${id}`;
+      let checkoutUrl: null | string = null;
+      if (config.STRIPE_MODE === "live") {
+        const stripeSession = await stripeCheckout(context, checkout, id, body.return_origin);
+        providerId = stripeSession.id;
+        clientSecret = String(stripeSession.client_secret ?? "");
+        checkoutUrl = stripeSession.url;
+      }
+      const metadata = { reservations, checkout_url: checkoutUrl, reservations_released: false };
+      const attempt = (await client.query(`
+        insert into payment_attempts(id,checkout_session_id,status,amount_mxn,currency,provider,provider_payment_intent_id,client_secret,metadata)
+        values($1,$2,'pending',$3,$4,$5,$6,$7,$8) returning *
+      `, [id, checkout.id, checkout.total_mxn, checkout.currency, provider, providerId, clientSecret, metadata])).rows[0];
+      await client.query("update checkout_sessions set payment_attempt_id=$2,updated_at=now() where id=$1", [checkout.id, id]);
+      await client.query("commit");
+      reply.status(201);
+      return attemptResponse(attempt);
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+  app.get<{Params:{attempt_id:string}}>("/payments/attempts/:attempt_id", async (request) => {
+    const attempt = (await context.database.query("select * from payment_attempts where id=$1", [request.params.attempt_id])).rows[0];
+    if (!attempt) throw new HttpError(404, "Intento de pago no encontrado");
+    await checkoutForPaymentAttempt(context, request, attempt);
+    return attemptResponse(attempt);
+  });
+  app.post<{Params:{attempt_id:string}}>("/payments/attempts/:attempt_id/cancel", async (request) => {
+    const client = await context.database.connect();
+    try {
+      await client.query("begin");
+      const attempt = (await client.query("select * from payment_attempts where id=$1 for update", [request.params.attempt_id])).rows[0];
+      if (!attempt) throw new HttpError(404, "Intento de pago no encontrado");
+      await checkoutForPaymentAttempt(context, request, attempt, client);
+      if (attempt.status === "pending") {
+        if (config.STRIPE_MODE === "live" && attempt.provider_payment_intent_id) {
+          await context.stripe.checkout.sessions.expire(attempt.provider_payment_intent_id).catch(() => undefined);
+        }
+        await releaseReservations(client, attempt, "cancelled");
+      }
+      const row = (await client.query("update payment_attempts set status='cancelled',updated_at=now() where id=$1 returning *", [attempt.id])).rows[0];
+      await client.query("commit");
+      return attemptResponse(row);
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+  app.post<{Params:{attempt_id:string}}>("/payments/attempts/:attempt_id/confirm", async (request) => {
+    const client = await context.database.connect();
+    try {
+      await client.query("begin");
+      let attempt = (await client.query("select * from payment_attempts where id=$1 for update", [request.params.attempt_id])).rows[0];
+      if (!attempt) throw new HttpError(404, "Intento de pago no encontrado");
+      const checkout = await checkoutForPaymentAttempt(context, request, attempt, client);
+      if (attempt.status === "succeeded") {
+        const order = (await client.query("select id from orders where payment_attempt_id=$1", [attempt.id])).rows[0];
+        if (!order) throw new HttpError(409, "El pago no tiene un pedido asociado");
+        const orderAccessToken = await replaceOrderAccessToken(client, order.id);
+        await client.query("commit");
+        return { attempt: attemptResponse(attempt), order_id: order.id, order_access_token: orderAccessToken, refunded_oversell: false };
+      }
+      if (attempt.status !== "pending") throw new HttpError(409, "Intento no confirmable");
+      let chargeId = `mock_charge_${attempt.id}`;
+      if (config.STRIPE_MODE === "live") {
+        const session = await context.stripe.checkout.sessions.retrieve(attempt.provider_payment_intent_id);
+        if (session.payment_status !== "paid") throw new HttpError(409, "El pago aún no está confirmado");
+        chargeId = typeof session.payment_intent === "string" ? session.payment_intent : String((session.payment_intent as any)?.id ?? session.id);
+      }
+      if (!Array.isArray(attempt.metadata?.reservations) || attempt.metadata.reservations_released) {
+        if (config.STRIPE_MODE === "live" && chargeId) await context.stripe.refunds.create({ payment_intent: chargeId }).catch(() => undefined);
+        attempt = (await client.query("update payment_attempts set status='refunded',failure_reason='oversell',updated_at=now() where id=$1 returning *", [attempt.id])).rows[0];
+        await client.query("commit");
+        return { attempt: attemptResponse(attempt), order_id: null, order_access_token: null, refunded_oversell: true };
+      }
+      attempt = (await client.query("update payment_attempts set status='succeeded',provider_charge_id=$2,updated_at=now() where id=$1 returning *", [attempt.id, chargeId])).rows[0];
+      await client.query(`
+        insert into payment_transactions(id,payment_attempt_id,checkout_session_id,status,amount_mxn,currency,provider,provider_charge_id)
+        values($1,$2,$3,'succeeded',$4,$5,$6,$7)
+      `, [randomUUID(), attempt.id, attempt.checkout_session_id, attempt.amount_mxn, attempt.currency, attempt.provider, chargeId]);
+      const createdOrder = await createOrder(client, checkout, attempt);
+      await client.query("commit");
+      for (const socket of context.sockets) if (socket.readyState === 1) socket.send(JSON.stringify({ type: "sale_confirmed", order_id: createdOrder.orderId, amount_mxn: attempt.amount_mxn }));
+      return { attempt: attemptResponse(attempt), order_id: createdOrder.orderId, order_access_token: createdOrder.orderAccessToken, refunded_oversell: false };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
 
   app.get<{Params:{order_id:string}}>("/orders/:order_id",async(request)=>orderResponse(context,request,"id",request.params.order_id));
   app.get<{Params:{checkout_id:string}}>("/orders/by-checkout/:checkout_id",async(request)=>orderResponse(context,request,"checkout_session_id",request.params.checkout_id));
