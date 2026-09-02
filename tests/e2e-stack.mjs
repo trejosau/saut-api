@@ -1,9 +1,11 @@
 /* global process, fetch, console */
 
 import { WebSocket } from "ws";
+import { createHmac } from "node:crypto";
 import { clearTimeout, setTimeout } from "node:timers";
 
 const base = process.env.API_BASE_URL ?? "http://localhost:8080";
+const skydropxSecret = process.env.SKYDROPX_WEBHOOK_SECRET ?? "skydropx_wh_mock";
 
 async function request(method, path, body, extraHeaders) {
   const response = await fetch(`${base}${path}`, {
@@ -116,6 +118,31 @@ const order = await request("GET", `/orders/${confirmed.order_id}`, undefined, {
   "x-order-access-token": retry.order_access_token
 });
 if (order.id !== confirmed.order_id || order.items.length !== 1) throw new Error("Retried order contract failed");
+
+const skydropxPayload = JSON.stringify({
+  data: {
+    id: "e2e-package",
+    type: "packages",
+    attributes: { status: "in_transit", tracking_number: "E2E-UNKNOWN", returned: false, returned_status: null },
+    relationships: { shipment: { data: { id: "e2e-shipment" } } }
+  }
+});
+const skydropxSignature = createHmac("sha512", skydropxSecret).update(skydropxPayload).digest("hex");
+const skydropxWebhook = await fetch(`${base}/webhooks/shipping/skydropx`, {
+  method: "POST",
+  headers: { "content-type": "application/json", authorization: `HMAC ${skydropxSignature}` },
+  body: skydropxPayload
+});
+if (!skydropxWebhook.ok) throw new Error(`Skydropx webhook failed: ${skydropxWebhook.status} ${await skydropxWebhook.text()}`);
+const skydropxResult = await skydropxWebhook.json();
+if (!skydropxResult.received || skydropxResult.duplicate || skydropxResult.matched) throw new Error("Skydropx webhook contract failed");
+const skydropxRetry = await fetch(`${base}/webhooks/shipping/skydropx`, {
+  method: "POST",
+  headers: { "content-type": "application/json", authorization: `HMAC ${skydropxSignature}` },
+  body: skydropxPayload
+});
+const skydropxRetryResult = await skydropxRetry.json();
+if (!skydropxRetryResult.received || !skydropxRetryResult.duplicate) throw new Error("Skydropx webhook was not idempotent");
 await expectStatus("PATCH", `/shipping/local/orders/${confirmed.order_id}/address`, 403, {
   address: { line1: "Calle sin autorización 1" }
 });

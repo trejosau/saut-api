@@ -8,7 +8,7 @@ const domainTables = [
   "role_permissions", "account_roles", "account_permission_overrides", "audit_log", "designs", "design_variants",
   "informative_images", "publications", "publication_mockups", "collections_sets", "collection_set_items", "drops",
   "drop_items", "season_config", "carts", "cart_items", "checkout_sessions", "payment_attempts",
-  "payment_transactions", "refunds", "orders", "order_items", "order_state_history", "drop_counters", "work_orders",
+  "payment_transactions", "refunds", "webhook_events", "orders", "order_items", "order_state_history", "drop_counters", "work_orders",
   "work_order_failures", "inventory_items", "inventory_movements", "stock_entries", "shipments", "shipment_events",
   "local_address_changes", "local_delivery_evidences", "support_cases", "support_case_messages",
   "support_case_attachments", "support_case_order_links", "notification_deliveries", "analytics_events", "sales_pings",
@@ -16,10 +16,13 @@ const domainTables = [
 ] as const;
 
 describe("consolidated schema", () => {
-  it("contains all 49 migrated tables plus persistent assets", async () => {
+  it("contains all migrated tables plus persistent assets", async () => {
     const sql = await readFile(resolve(process.cwd(), "migrations/0001_consolidated_schema.sql"), "utf8");
-    expect(domainTables).toHaveLength(50);
-    for (const table of domainTables) expect(sql).toContain(`CREATE TABLE IF NOT EXISTS ${table}`);
+    const webhookSql = await readFile(resolve(process.cwd(), "migrations/0002_webhook_integrity.sql"), "utf8");
+    expect(domainTables).toHaveLength(51);
+    const allMigrations = `${sql}\n${webhookSql}`;
+    for (const table of domainTables) expect(allMigrations).toContain(`CREATE TABLE IF NOT EXISTS ${table}`);
+    expect(webhookSql).toContain("CREATE TABLE IF NOT EXISTS webhook_events");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS migration_runs");
   });
 });
