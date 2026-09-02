@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, readdir } from "node:fs/promises";
+import { mkdir, readFile, readdir, unlink } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
 import pg from "pg";
@@ -69,13 +69,18 @@ async function backupDatabase(name: string): Promise<string> {
   await mkdir(config.MIGRATION_BACKUP_DIR, { recursive: true });
   const stamp = new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
   const output = resolve(config.MIGRATION_BACKUP_DIR, `${name}-${stamp}.dump`);
-  await new Promise<void>((resolvePromise, reject) => {
-    const child = spawn("pg_dump", ["--format=custom", "--file", output, databaseUrl(name)], {
-      stdio: ["ignore", "inherit", "inherit"]
+  try {
+    await new Promise<void>((resolvePromise, reject) => {
+      const child = spawn("pg_dump", ["--format=custom", "--file", output, databaseUrl(name)], {
+        stdio: ["ignore", "inherit", "inherit"]
+      });
+      child.once("error", reject);
+      child.once("exit", (code) => code === 0 ? resolvePromise() : reject(new Error(`pg_dump ${name} exited ${code}`)));
     });
-    child.once("error", reject);
-    child.once("exit", (code) => code === 0 ? resolvePromise() : reject(new Error(`pg_dump ${name} exited ${code}`)));
-  });
+  } catch (error) {
+    await unlink(output).catch(() => undefined);
+    throw error;
+  }
   return output;
 }
 
@@ -167,8 +172,8 @@ async function copyTable(source: pg.Client, target: pg.Client, table: string): P
 
 async function importLegacyDatabase(name: string, target: pg.Client): Promise<Record<string, unknown>> {
   const source = new Client({ connectionString: databaseUrl(name) });
-  await source.connect();
   try {
+    await source.connect();
     const available = await tableNames(source);
     const targetAvailable = new Set(await tableNames(target));
     const report: Record<string, unknown> = {};
@@ -180,14 +185,14 @@ async function importLegacyDatabase(name: string, target: pg.Client): Promise<Re
     report.archived_only_tables = available.filter((table) => !targetAvailable.has(table));
     return report;
   } finally {
-    await source.end();
+    await source.end().catch(() => undefined);
   }
 }
 
 async function main(): Promise<void> {
   const admin = new Client({ connectionString: config.POSTGRES_ADMIN_URL });
-  await admin.connect();
   try {
+    await admin.connect();
     await ensureTargetDatabase(admin);
     const existing = config.MIGRATION_IMPORT_LEGACY_DATABASES
       ? (await admin.query<{ datname: string }>(
@@ -196,8 +201,8 @@ async function main(): Promise<void> {
         )).rows.map((row) => row.datname)
       : [];
     const target = new Client({ connectionString: databaseUrl(TARGET_DATABASE) });
-    await target.connect();
     try {
+      await target.connect();
       const root = process.cwd();
       const migrations = resolve(root, "migrations");
       const seeds = resolve(root, "seeds");
@@ -241,10 +246,10 @@ async function main(): Promise<void> {
       await applySqlDirectory(target, seeds);
       console.log(`Bootstrap completed for ${TARGET_DATABASE}`);
     } finally {
-      await target.end();
+      await target.end().catch(() => undefined);
     }
   } finally {
-    await admin.end();
+    await admin.end().catch(() => undefined);
   }
 }
 
