@@ -279,6 +279,9 @@ export async function registerAuth(app: FastifyInstance, context: AppContext): P
   });
   app.post("/auth/google/exchange", async (request) => exchangeGoogle(context, request, asObject(request.body)));
   app.post("/auth/google/consume", async (request) => {
+    if (request.headers["x-internal-api-key"] !== config.AUTH_INTERNAL_API_KEY) {
+      throw new HttpError(401, "Clave interna inválida");
+    }
     const body = asObject(request.body);
     const ticket = z.string().min(32).max(128).parse(body.ticket);
     const expectedState = z.string().min(1).max(512).parse(body.state);

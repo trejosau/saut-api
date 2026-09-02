@@ -199,3 +199,23 @@ describe("refresh rotation and self-revocation", () => {
     expect(database.query.mock.calls[0]?.[1]).toEqual([accountId, "blocked", "account_status_changed"]);
   });
 });
+
+describe("Google handoff boundary", () => {
+  beforeEach(() => {
+    database.query.mockReset();
+  });
+
+  it("does not expose one-time handoff tokens without the internal BFF key", async () => {
+    const app = await authRoutes();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/auth/google/consume",
+      payload: { ticket: "t".repeat(32), state: "state" },
+    });
+    await app.close();
+
+    expect(response.statusCode).toBe(401);
+    expect(database.query).not.toHaveBeenCalled();
+  });
+});
