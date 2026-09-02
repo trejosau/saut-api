@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { config } from "../config.js";
-import { fetchExternal, HttpError } from "../platform.js";
+import { fetchExternal, HttpError, recordProviderFailure } from "../platform.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -41,6 +41,7 @@ export type ShippingQuote = {
 
 async function accessToken(): Promise<string> {
   if (!config.SKYDROPX_CLIENT_ID || !config.SKYDROPX_CLIENT_SECRET) {
+    recordProviderFailure("skydropx");
     throw new HttpError(503, "Credenciales Skydropx no configuradas");
   }
 
@@ -55,11 +56,14 @@ async function accessToken(): Promise<string> {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: form,
-  });
+  }, undefined, "skydropx");
   if (!response.ok) throw new HttpError(503, `Skydropx OAuth falló (${response.status})`);
 
   const token = String(toRecord(await response.json()).access_token ?? "");
-  if (!token) throw new HttpError(503, "Skydropx no devolvió access_token");
+  if (!token) {
+    recordProviderFailure("skydropx");
+    throw new HttpError(503, "Skydropx no devolvió access_token");
+  }
   return token;
 }
 
@@ -167,7 +171,7 @@ export async function quoteNational(
         : null,
       order_id: orderId ?? null,
     } }),
-  });
+  }, undefined, "skydropx");
   if (!response.ok) {
     throw new HttpError(503, `Skydropx quotation falló (${response.status}): ${await response.text()}`);
   }
@@ -182,14 +186,17 @@ export async function quoteNational(
   if (!rates.length && quotationId) {
     const lookup = await fetchExternal(`${config.SKYDROPX_BASE_URL}/api/v1/quotations/${quotationId}`, {
       headers: { authorization: `Bearer ${token}` },
-    });
+    }, undefined, "skydropx");
     if (lookup.ok) {
       payload = await lookup.json();
       rates = ratesFrom(payload, quotationId);
     }
   }
 
-  if (!rates.length) throw new HttpError(503, "Skydropx no devolvió tarifas");
+  if (!rates.length) {
+    recordProviderFailure("skydropx");
+    throw new HttpError(503, "Skydropx no devolvió tarifas");
+  }
   return rates;
 }
 
@@ -246,7 +253,7 @@ export async function createNationalShipment(
         package_type: input.package_type ?? null,
       }],
     } }),
-  });
+  }, undefined, "skydropx");
   if (!response.ok) {
     throw new HttpError(503, `Skydropx shipment falló (${response.status}): ${await response.text()}`);
   }
@@ -258,6 +265,7 @@ export async function createNationalShipment(
   );
   const tracking_number = String(findDeep(payload, "tracking_number") ?? "");
   if (!provider_shipment_id || !tracking_number) {
+    recordProviderFailure("skydropx");
     throw new HttpError(503, "Skydropx no devolvió shipment/tracking");
   }
 
@@ -287,7 +295,7 @@ export async function fetchTracking(
   const url = new URL(`${config.SKYDROPX_BASE_URL}/api/v1/shipments/tracking`);
   url.searchParams.set("tracking_number", trackingNumber);
   url.searchParams.set("carrier_name", carrier);
-  const response = await fetchExternal(url, { headers: { authorization: `Bearer ${token}` } });
+  const response = await fetchExternal(url, { headers: { authorization: `Bearer ${token}` } }, undefined, "skydropx");
   if (!response.ok) throw new HttpError(503, `Skydropx tracking falló (${response.status})`);
 
   const raw: unknown = await response.json();

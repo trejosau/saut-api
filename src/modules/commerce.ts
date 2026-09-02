@@ -4,7 +4,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type pg from "pg";
 
 import { config } from "../config.js";
-import { asObject, bearerToken, HttpError, randomToken, secureEqual, sha256, verifyAccessToken } from "../platform.js";
+import { asObject, bearerToken, HttpError, randomToken, secureEqual, sha256, verifyAccessToken, withProviderMetrics } from "../platform.js";
 import { quoteNational } from "../providers/skydropx.js";
 import type { AppContext } from "../types.js";
 
@@ -278,14 +278,14 @@ async function stripeCheckout(context: AppContext, checkout: any, attemptId: str
   }
   const checkoutPath = `/checkout?payment=success&payment_attempt=${encodeURIComponent(attemptId)}&checkout_id=${encodeURIComponent(checkout.id)}&session_id={CHECKOUT_SESSION_ID}`;
   const cancelPath = `/checkout?checkout=cancel&payment_attempt=${encodeURIComponent(attemptId)}&checkout_id=${encodeURIComponent(checkout.id)}`;
-  return context.stripe.checkout.sessions.create({
+  return withProviderMetrics("stripe", () => context.stripe.checkout.sessions.create({
     mode: "payment",
     success_url: `${origin}${checkoutPath}`,
     cancel_url: `${origin}${cancelPath}`,
     customer_email: checkout.email,
     line_items: [{ quantity: 1, price_data: { currency: "mxn", unit_amount: Number(checkout.total_mxn) * 100, product_data: { name: `Pedido SAUT ${checkout.id}` } } }],
     metadata: { checkout_session_id: checkout.id }
-  });
+  }));
 }
 
 export async function expirePaymentReservations(context: AppContext): Promise<void> {
@@ -446,7 +446,7 @@ export async function registerCommerce(app: FastifyInstance, context: AppContext
       await checkoutForPaymentAttempt(context, request, attempt, client);
       if (attempt.status === "pending") {
         if (config.STRIPE_MODE === "live" && attempt.provider_payment_intent_id) {
-          await context.stripe.checkout.sessions.expire(attempt.provider_payment_intent_id).catch(() => undefined);
+          await withProviderMetrics("stripe", () => context.stripe.checkout.sessions.expire(attempt.provider_payment_intent_id)).catch(() => undefined);
         }
         await releaseReservations(client, attempt, "cancelled");
       }
@@ -477,12 +477,12 @@ export async function registerCommerce(app: FastifyInstance, context: AppContext
       if (attempt.status !== "pending") throw new HttpError(409, "Intento no confirmable");
       let chargeId = `mock_charge_${attempt.id}`;
       if (config.STRIPE_MODE === "live") {
-        const session = await context.stripe.checkout.sessions.retrieve(attempt.provider_payment_intent_id);
+        const session = await withProviderMetrics("stripe", () => context.stripe.checkout.sessions.retrieve(attempt.provider_payment_intent_id));
         if (session.payment_status !== "paid") throw new HttpError(409, "El pago aún no está confirmado");
         chargeId = typeof session.payment_intent === "string" ? session.payment_intent : String((session.payment_intent as any)?.id ?? session.id);
       }
       if (!Array.isArray(attempt.metadata?.reservations) || attempt.metadata.reservations_released) {
-        if (config.STRIPE_MODE === "live" && chargeId) await context.stripe.refunds.create({ payment_intent: chargeId }).catch(() => undefined);
+        if (config.STRIPE_MODE === "live" && chargeId) await withProviderMetrics("stripe", () => context.stripe.refunds.create({ payment_intent: chargeId })).catch(() => undefined);
         attempt = (await client.query("update payment_attempts set status='refunded',failure_reason='oversell',updated_at=now() where id=$1 returning *", [attempt.id])).rows[0];
         await client.query("commit");
         return { attempt: attemptResponse(attempt), order_id: null, order_access_token: null, refunded_oversell: true };

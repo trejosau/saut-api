@@ -153,7 +153,7 @@ async function findOrCreateEmailAccount(context: AppContext, email: string): Pro
 }
 
 async function googleDiscovery(): Promise<{ authorization_endpoint: string; token_endpoint: string; userinfo_endpoint: string }> {
-  const response = await fetchExternal(config.AUTH_GOOGLE_DISCOVERY_URL);
+  const response = await fetchExternal(config.AUTH_GOOGLE_DISCOVERY_URL, {}, undefined, "google");
   if (!response.ok) throw new HttpError(503, "Google temporalmente no disponible");
   return response.json() as Promise<any>;
 }
@@ -191,10 +191,10 @@ async function exchangeGoogle(context: AppContext, request: FastifyRequest, body
       redirect_uri: String(body.redirect_uri ?? config.AUTH_GOOGLE_REDIRECT_URI),
       grant_type: "authorization_code"
     })
-  });
+  }, undefined, "google");
   if (!tokenResponse.ok) throw new HttpError(401, "No se pudo completar el login con Google");
   const tokens = asObject(await tokenResponse.json());
-  const userResponse = await fetchExternal(discovery.userinfo_endpoint, { headers: { authorization: `Bearer ${tokens.access_token}` } });
+  const userResponse = await fetchExternal(discovery.userinfo_endpoint, { headers: { authorization: `Bearer ${tokens.access_token}` } }, undefined, "google");
   if (!userResponse.ok) throw new HttpError(401, "No se pudo validar la cuenta de Google");
   const user = asObject(await userResponse.json());
   const subject = z.string().min(1).parse(user.sub);
