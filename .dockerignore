@@ -1,0 +1,10 @@
+node_modules/
+dist/
+generated/
+coverage/
+backups/
+*.dump
+.git/
+.env
+.env.*.local
+*.log

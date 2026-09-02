@@ -32,6 +32,8 @@ jobs:
       - run: npm run test:coverage
       - run: npm run prisma:validate
       - run: npm run build
+      - name: Build production image
+        run: docker build --tag saut-api:ci .
 
   e2e:
     runs-on: ubuntu-latest
@@ -69,7 +71,7 @@ jobs:
           cache: npm
       - run: npm install --global npm@12.0.2
       - run: npm ci
-      - run: npm run build
+      - run: docker build --tag saut-api:e2e .
       - name: Start S3-compatible storage
         run: |
           docker run --detach --rm --name saut-ci-minio --network host \
@@ -110,15 +112,24 @@ jobs:
         run: |
           set -euo pipefail
           npm run prisma:deploy
+          npm run prisma:status
           npm run bootstrap
-          npm run start > /tmp/saut-api.log 2>&1 &
-          api_pid=$!
-          trap 'kill "$api_pid" || true; docker stop saut-ci-minio || true' EXIT
+          docker run --detach --rm --name saut-ci-api --network host \
+            --env NODE_ENV --env HOST --env PORT \
+            --env DATABASE_URL --env POSTGRES_ADMIN_URL --env REDIS_URL \
+            --env S3_ENDPOINT --env S3_PUBLIC_ENDPOINT --env S3_BUCKET \
+            --env S3_ACCESS_KEY --env S3_SECRET_KEY \
+            --env AUTH_CODE_SECRET --env AUTH_TOKEN_SECRET --env AUTH_INTERNAL_API_KEY \
+            --env ASSETS_SIGNING_SECRET --env ASSETS_INTERNAL_API_KEY \
+            --env STRIPE_MODE --env SKYDROPX_MODE --env NOTIFICATION_DEV_MODE \
+            saut-api:e2e
+          trap 'docker stop saut-ci-api || true; docker stop saut-ci-minio || true' EXIT
           for attempt in {1..30}; do
             if curl --fail --silent --show-error http://127.0.0.1:8080/ready; then
               break
             fi
             sleep 1
           done
+          docker logs saut-ci-api
           curl --fail --silent --show-error http://127.0.0.1:8080/ready
           npm run e2e
