@@ -150,6 +150,6 @@ export async function registerAssets(app: FastifyInstance, context: AppContext):
     const object = await context.s3.send(new GetObjectCommand({ Bucket: config.S3_BUCKET, Key: asset.object_key }));
     if (!object.Body) throw new HttpError(404, "Contenido del asset no encontrado");
     reply.type(asset.content_type).header("content-length", String(asset.size_bytes)).header("cache-control", asset.visibility === "public" ? "public, max-age=31536000, immutable" : "private, no-store");
-    return reply.send(Buffer.from(await object.Body.transformToByteArray()));
+    return reply.send(object.Body);
   });
 }
