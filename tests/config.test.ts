@@ -4,6 +4,9 @@ import { parseConfig } from "../src/config.js";
 
 const productionEnvironment = {
   NODE_ENV: "production",
+  DATABASE_URL: "postgres://saut:production-password@db.internal:5432/saut",
+  POSTGRES_ADMIN_URL: "postgres://saut:production-password@db.internal:5432/postgres",
+  REDIS_URL: "redis://:production-password@redis.internal:6379/0",
   AUTH_CODE_SECRET: "production-code-secret",
   AUTH_TOKEN_SECRET: "production-token-secret",
   AUTH_INTERNAL_API_KEY: "production-internal-key",
@@ -15,7 +18,10 @@ const productionEnvironment = {
   MIGRATION_DROP_LEGACY_DATABASES: "false",
   RATE_LIMIT_FAIL_OPEN: "false",
   STRIPE_MODE: "live",
-  SKYDROPX_MODE: "live"
+  STRIPE_SECRET_KEY: "sk_live_production",
+  STRIPE_WEBHOOK_SECRET: "whsec_production",
+  SKYDROPX_MODE: "live",
+  SKYDROPX_WEBHOOK_SECRET: "skydropx-production"
 } satisfies NodeJS.ProcessEnv;
 
 describe("parseConfig", () => {
@@ -33,5 +39,10 @@ describe("parseConfig", () => {
 
   it("rejects fail-open rate limiting in production", () => {
     expect(() => parseConfig({ ...productionEnvironment, RATE_LIMIT_FAIL_OPEN: "true" })).toThrowError();
+  });
+
+  it("rejects mock provider credentials in production", () => {
+    expect(() => parseConfig({ ...productionEnvironment, STRIPE_SECRET_KEY: "sk_test_mock" })).toThrowError();
+    expect(() => parseConfig({ ...productionEnvironment, SKYDROPX_WEBHOOK_SECRET: "skydropx_wh_mock" })).toThrowError();
   });
 });

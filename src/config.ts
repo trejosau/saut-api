@@ -91,12 +91,18 @@ const schema = z.object({
   if (values.NODE_ENV !== "production") return;
 
   const unsafeSecrets: Array<[keyof typeof values, string]> = [
+    ["DATABASE_URL", "postgres://saut:saut@localhost:5432/saut"],
+    ["POSTGRES_ADMIN_URL", "postgres://saut:saut@localhost:5432/postgres"],
+    ["REDIS_URL", "redis://localhost:6379"],
     ["AUTH_CODE_SECRET", "dev-auth-code-secret"],
     ["AUTH_TOKEN_SECRET", "dev-auth-token-secret-change-me"],
     ["AUTH_INTERNAL_API_KEY", "dev-internal-auth-key"],
     ["S3_SECRET_KEY", "saut_minio_password"],
     ["ASSETS_SIGNING_SECRET", "dev-assets-signing-secret"],
-    ["ASSETS_INTERNAL_API_KEY", "dev-assets-internal-key"]
+    ["ASSETS_INTERNAL_API_KEY", "dev-assets-internal-key"],
+    ["STRIPE_SECRET_KEY", "sk_test_mock"],
+    ["STRIPE_WEBHOOK_SECRET", "whsec_mock"],
+    ["SKYDROPX_WEBHOOK_SECRET", "skydropx_wh_mock"]
   ];
 
   for (const [path, developmentValue] of unsafeSecrets) {
