@@ -2,8 +2,7 @@ import { ArgumentsHost, Catch, Controller, DynamicModule, ExceptionFilter, Get, 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 import { config } from "../config.js";
-import { closeDatabase } from "../db.js";
-import { normalizeApiError, readiness } from "../platform.js";
+import { closeAppContext, normalizeApiError, readiness } from "../platform.js";
 import type { AppContext } from "../types.js";
 import { APP_CONTEXT, APP_OWNS_CONTEXT, FASTIFY_SERVER } from "./tokens.js";
 
@@ -50,8 +49,7 @@ class InfrastructureLifecycle implements OnApplicationShutdown {
 
   async onApplicationShutdown(): Promise<void> {
     if (!this.ownsContext) return;
-    this.context.redis.disconnect();
-    await closeDatabase();
+    await closeAppContext(this.context);
   }
 }
 

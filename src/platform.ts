@@ -228,25 +228,78 @@ export function asObject(value: unknown): Record<string, any> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
 }
 
+const closingContexts = new WeakMap<AppContext, Promise<void>>();
+
+/** Closes resources owned by an application context exactly once. */
+export function closeAppContext(context: AppContext): Promise<void> {
+  const existing = closingContexts.get(context);
+  if (existing) return existing;
+
+  const closing = (async () => {
+    let closeError: unknown;
+    for (const socket of context.sockets) {
+      try {
+        socket.close();
+      } catch (error) {
+        closeError ??= error;
+      }
+    }
+    context.sockets.clear();
+    try {
+      context.redis.disconnect();
+    } catch (error) {
+      closeError ??= error;
+    }
+    try {
+      context.s3.destroy();
+    } catch (error) {
+      closeError ??= error;
+    }
+    try {
+      await context.database.close();
+    } catch (error) {
+      closeError ??= error;
+    }
+    if (closeError) throw closeError;
+  })();
+  closingContexts.set(context, closing);
+  return closing;
+}
+
 export async function createContext(): Promise<AppContext> {
   const redis = new Redis(config.REDIS_URL, { maxRetriesPerRequest: 1, lazyConnect: true });
   redis.on("error", (error: Error) => console.error("Redis error", error.message));
-  await redis.connect().catch((error: Error) => {
-    if (!config.RATE_LIMIT_FAIL_OPEN) throw error;
-  });
-  const s3 = new S3Client({
-    endpoint: config.S3_ENDPOINT,
-    region: config.S3_REGION,
-    forcePathStyle: true,
-    credentials: { accessKeyId: config.S3_ACCESS_KEY, secretAccessKey: config.S3_SECRET_KEY }
-  });
+  let s3: S3Client | undefined;
   try {
-    await s3.send(new HeadBucketCommand({ Bucket: config.S3_BUCKET }));
-  } catch {
-    await s3.send(new CreateBucketCommand({ Bucket: config.S3_BUCKET }));
+    await redis.connect().catch((error: Error) => {
+      if (!config.RATE_LIMIT_FAIL_OPEN) throw error;
+    });
+    s3 = new S3Client({
+      endpoint: config.S3_ENDPOINT,
+      region: config.S3_REGION,
+      forcePathStyle: true,
+      credentials: { accessKeyId: config.S3_ACCESS_KEY, secretAccessKey: config.S3_SECRET_KEY }
+    });
+    try {
+      await s3.send(new HeadBucketCommand({ Bucket: config.S3_BUCKET }));
+    } catch {
+      await s3.send(new CreateBucketCommand({ Bucket: config.S3_BUCKET }));
+    }
+    const stripe = new Stripe(config.STRIPE_SECRET_KEY);
+    return { database, redis, s3: s3!, stripe, sockets: new Set() };
+  } catch (error) {
+    try {
+      redis.disconnect();
+    } catch {
+      // Preserve the original startup error.
+    }
+    try {
+      s3?.destroy();
+    } catch {
+      // Preserve the original startup error.
+    }
+    throw error;
   }
-  const stripe = new Stripe(config.STRIPE_SECRET_KEY);
-  return { database, redis, s3, stripe, sockets: new Set() };
 }
 
 async function globalRateLimit(request: FastifyRequest): Promise<void> {
@@ -281,25 +334,30 @@ export function permissionForPath(path: string, method: string): string | undefi
 
 export async function buildFastifyServer(context: AppContext): Promise<FastifyInstance> {
   const app = Fastify({ logger: true, bodyLimit: 100 * 1024 * 1024, trustProxy: true, requestIdHeader: "x-request-id" });
-  app.context = context;
-  await app.register(cors, {
-    origin: (origin, callback) => callback(null, !origin || config.corsOrigins.includes(origin)),
-    credentials: true
-  });
-  await app.register(websocket);
-  app.addContentTypeParser(["application/octet-stream", "application/pdf", "image/png", "image/jpeg", "image/webp"], { parseAs: "buffer" }, (_request, body, done) => done(null, body));
-  app.addHook("onRequest", globalRateLimit);
-  app.addHook("preHandler", async (request) => {
-    const path = request.url.split("?", 1)[0] ?? request.url;
-    if (path.startsWith("/admin/") || path.startsWith("/ops/")) {
-      const actor = await authenticate(request);
-      requirePermission(actor, permissionForPath(path, request.method));
-    }
-    if ((path.startsWith("/internal/") || path.startsWith("/notifications/")) && request.headers["x-internal-api-key"] !== config.AUTH_INTERNAL_API_KEY) {
-      throw new HttpError(401, "API key interna inválida");
-    }
-  });
-  return app;
+  try {
+    app.context = context;
+    await app.register(cors, {
+      origin: (origin, callback) => callback(null, !origin || config.corsOrigins.includes(origin)),
+      credentials: true
+    });
+    await app.register(websocket);
+    app.addContentTypeParser(["application/octet-stream", "application/pdf", "image/png", "image/jpeg", "image/webp"], { parseAs: "buffer" }, (_request, body, done) => done(null, body));
+    app.addHook("onRequest", globalRateLimit);
+    app.addHook("preHandler", async (request) => {
+      const path = request.url.split("?", 1)[0] ?? request.url;
+      if (path.startsWith("/admin/") || path.startsWith("/ops/")) {
+        const actor = await authenticate(request);
+        requirePermission(actor, permissionForPath(path, request.method));
+      }
+      if ((path.startsWith("/internal/") || path.startsWith("/notifications/")) && request.headers["x-internal-api-key"] !== config.AUTH_INTERNAL_API_KEY) {
+        throw new HttpError(401, "API key interna inválida");
+      }
+    });
+    return app;
+  } catch (error) {
+    await app.close().catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function readiness(context: AppContext): Promise<{ status: string; service: string; version: string }> {

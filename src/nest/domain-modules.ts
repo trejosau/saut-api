@@ -71,18 +71,27 @@ class CommerceRouteRegistrar extends RouteRegistrar implements OnModuleInit {
 class PaymentReservationExpiryWorker implements OnApplicationBootstrap, OnApplicationShutdown {
   private readonly logger = new Logger(PaymentReservationExpiryWorker.name);
   private timer?: NodeJS.Timeout;
+  private running?: Promise<void>;
 
   constructor(@Inject(APP_CONTEXT) private readonly context: AppContext) {}
 
   onApplicationBootstrap(): void {
+    if (this.timer) return;
     this.timer = setInterval(() => {
-      expirePaymentReservations(this.context).catch((error: unknown) => this.logger.error(error));
+      if (this.running) return;
+      this.running = expirePaymentReservations(this.context)
+        .catch((error: unknown) => this.logger.error(error))
+        .finally(() => { this.running = undefined; });
     }, 60_000);
     this.timer.unref();
   }
 
-  onApplicationShutdown(): void {
-    if (this.timer) clearInterval(this.timer);
+  async onApplicationShutdown(): Promise<void> {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+    await this.running;
   }
 }
 
