@@ -9,6 +9,7 @@ import {
   randomToken, secureEqual, sha256, signAccessToken, verifyAccessToken
 } from "../platform.js";
 import type { AppContext } from "../types.js";
+import { recordAuthEvent } from "./advanced-auth.js";
 
 const emailSchema = z.string().trim().email().max(320);
 
@@ -22,6 +23,8 @@ type AuthResult = {
   session_expires_in_sec: number;
   is_new_account: boolean;
   primary_email: string | null;
+  mfa_required?: boolean;
+  mfa_setup_required?: boolean;
   return_to?: string | null;
 };
 
@@ -101,6 +104,16 @@ async function issueSession(
     values ($1,$2,$3,now() + ($4 || ' seconds')::interval,$5,$6,now())
   `, [sessionId, account.id, sha256(refreshToken), config.AUTH_SESSION_TTL_SEC, request.ip, request.headers["user-agent"] ?? null]);
   const accessToken = await signAccessToken({ accountId: account.id, actorType: account.actor_type, sessionId });
+  await recordAuthEvent(context, request, "login.succeeded", { accountId: account.id, sessionId });
+  const [policy, mfa, access] = await Promise.all([
+    context.database.query<{ mode: string; required_roles: string[] }>("select mode, required_roles from mfa_policy where id = 1"),
+    context.database.query<{ enabled: boolean }>("select enabled from account_mfa where account_id = $1", [account.id]),
+    accountAccess(account.id),
+  ]);
+  const policyMode = policy.rows[0]?.mode ?? "optional";
+  const policyRequired = policyMode === "required_all"
+    || (policyMode === "required_roles" && access.roles.some((role) => (policy.rows[0]?.required_roles ?? []).includes(role)));
+  const mfaEnabled = Boolean(mfa.rows[0]?.enabled);
   return {
     account_id: account.id,
     session_id: sessionId,
@@ -111,6 +124,8 @@ async function issueSession(
     session_expires_in_sec: config.AUTH_SESSION_TTL_SEC,
     is_new_account: isNewAccount,
     primary_email: account.primary_email,
+    mfa_required: policyRequired,
+    mfa_setup_required: policyRequired && !mfaEnabled,
     ...(returnTo !== undefined ? { return_to: returnTo } : {})
   };
 }
@@ -467,11 +482,12 @@ export async function registerAuth(app: FastifyInstance, context: AppContext): P
     return { revoked: (result.rowCount ?? 0) > 0 };
   });
   app.get("/auth/me", async (request) => {
-    const actor = await authenticate(request);
+    const actor = await authenticate(request, { allowMfaPending: true });
     const result = await context.database.query<any>("select * from accounts where id = $1", [actor.accountId]);
     const account = result.rows[0];
     return { account_id: account.id, session_id: actor.sessionId, actor_type: account.actor_type, status: account.status, display_name: account.display_name,
-      primary_email: account.primary_email, roles: actor.roles, permissions: actor.permissions };
+      primary_email: account.primary_email, roles: actor.roles, permissions: actor.permissions,
+      mfa_required: actor.mfaRequired ?? false, mfa_enabled: actor.mfaEnabled ?? false, mfa_verified: Boolean(actor.mfaVerifiedAt) };
   });
 
   app.post("/internal/validate-token", async (request) => {

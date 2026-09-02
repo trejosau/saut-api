@@ -26,7 +26,7 @@ const LEGACY_DATABASES = [
 
 const TABLE_ORDER = [
   "accounts", "roles", "permissions", "account_identities", "login_challenges", "sessions",
-  "auth_events", "audit_log", "role_permissions", "account_roles", "account_permission_overrides",
+  "auth_events", "mfa_policy", "account_mfa", "recovery_codes", "audit_log", "role_permissions", "account_roles", "account_permission_overrides",
   "designs", "design_variants", "informative_images", "publications", "publication_mockups",
   "collections_sets", "collection_set_items", "drops", "drop_items", "season_config",
   "carts", "cart_items", "checkout_sessions", "payment_attempts", "payment_transactions", "refunds",

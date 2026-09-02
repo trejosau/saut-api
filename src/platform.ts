@@ -219,12 +219,34 @@ export async function verifyAccessToken(token: string): Promise<Actor> {
     if (!session.rows[0] || session.rows[0].revoked_at !== null || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
       throw new HttpError(401, "Sesión revocada o expirada");
     }
+    const security = await database.query<{
+      mfa_verified_at: Date | null; step_up_verified_at: Date | null; step_up_method: string | null;
+      mfa_enabled: boolean; mfa_mode: string; required_roles: string[];
+    }>(
+      `select s.mfa_verified_at, s.step_up_verified_at, s.step_up_method,
+        coalesce(am.enabled, false) as mfa_enabled, coalesce(mp.mode, 'optional') as mfa_mode,
+        coalesce(mp.required_roles, '{}') as required_roles
+       from sessions s
+       left join account_mfa am on am.account_id = s.account_id
+       left join mfa_policy mp on mp.id = 1
+       where s.id = $1 and s.account_id = $2`,
+      [sessionId, payload.sub]
+    );
     const access = await accountAccess(payload.sub);
+    const sessionState = security.rows[0];
+    const requiredRoles = Array.isArray(sessionState?.required_roles) ? sessionState.required_roles : [];
+    const mfaRequired = sessionState?.mfa_mode === "required_all"
+      || (sessionState?.mfa_mode === "required_roles" && access.roles.some((role) => requiredRoles.includes(role)));
     return {
       accountId: payload.sub,
       actorType: row.actor_type,
       sessionId,
-      ...access
+      ...access,
+      mfaRequired,
+      mfaEnabled: Boolean(sessionState?.mfa_enabled),
+      mfaVerifiedAt: sessionState?.mfa_verified_at ?? null,
+      stepUpVerifiedAt: sessionState?.step_up_verified_at ?? null,
+      stepUpMethod: sessionState?.step_up_method ?? null
     };
   } catch (error) {
     if (error instanceof HttpError) throw error;
@@ -238,10 +260,13 @@ export function bearerToken(request: FastifyRequest): string | null {
   return value.slice(7).trim() || null;
 }
 
-export async function authenticate(request: FastifyRequest): Promise<Actor> {
+export async function authenticate(request: FastifyRequest, options: { allowMfaPending?: boolean } = {}): Promise<Actor> {
   const token = bearerToken(request);
   if (!token) throw new HttpError(401, "Se requiere autenticación");
   const actor = await verifyAccessToken(token);
+  if (actor.mfaRequired && !actor.mfaVerifiedAt && !options.allowMfaPending) {
+    throw new HttpError(403, "Se requiere autenticación multifactor", undefined, "MFA_REQUIRED");
+  }
   request.actor = actor;
   return actor;
 }
@@ -358,7 +383,8 @@ async function globalRateLimit(request: FastifyRequest): Promise<void> {
 export function permissionForPath(path: string, method: string): string | undefined {
   const normalizedPath = path.split("?", 1)[0] ?? path;
   const action = method === "GET" || method === "HEAD" ? "read" : "write";
-  if (normalizedPath === "/admin/auth/audit-log" || normalizedPath.startsWith("/admin/auth/audit-log/")) return "auth:audit_read";
+  if (normalizedPath === "/admin/auth/audit-log" || normalizedPath.startsWith("/admin/auth/audit-log/")
+    || normalizedPath === "/admin/auth/events" || normalizedPath.startsWith("/admin/auth/events/")) return "auth:audit_read";
   if (normalizedPath.startsWith("/admin/auth/")) return "auth:rbac_manage";
   if (normalizedPath.startsWith("/admin/assets/sign-upload")) return "assets:write";
   if (normalizedPath.startsWith("/admin/assets/")) return "assets:read";

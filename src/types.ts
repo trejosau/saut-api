@@ -12,6 +12,11 @@ export type Actor = {
   sessionId: string;
   roles: string[];
   permissions: string[];
+  mfaRequired?: boolean;
+  mfaEnabled?: boolean;
+  mfaVerifiedAt?: Date | null;
+  stepUpVerifiedAt?: Date | null;
+  stepUpMethod?: string | null;
 };
 
 export type AppContext = {
