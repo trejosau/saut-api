@@ -21,7 +21,7 @@ describe("consolidated schema", () => {
     expect(domainTables).toHaveLength(54);
     const baseTables = domainTables.filter((table) => !["mfa_policy", "account_mfa", "recovery_codes", "webhook_events"].includes(table));
     for (const table of baseTables) expect(sql).toContain(`CREATE TABLE IF NOT EXISTS ${table}`);
-    const advancedAuthSql = await readFile(resolve(process.cwd(), "migrations/0004_advanced_auth_core.sql"), "utf8");
+    const advancedAuthSql = await readFile(resolve(process.cwd(), "prisma/migrations/20260902050000_advanced_auth_core/migration.sql"), "utf8");
     for (const table of ["mfa_policy", "account_mfa", "recovery_codes"]) {
       expect(advancedAuthSql).toContain(`CREATE TABLE IF NOT EXISTS ${table}`);
     }
