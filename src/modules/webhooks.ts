@@ -5,7 +5,7 @@ import type pg from "pg";
 import { z } from "zod";
 
 import { config } from "../config.js";
-import { confirmPaymentAttemptInTransaction } from "./commerce.js";
+import { confirmPaymentAttemptInTransaction, processOversellRefund } from "./commerce.js";
 import { asObject, HttpError, secureEqual, sha256 } from "../platform.js";
 import type { AppContext } from "../types.js";
 
@@ -176,7 +176,13 @@ async function processStripeEvent(context: AppContext, client: pg.PoolClient, ev
     throw new HttpError(409, "La moneda Stripe no coincide con el intento de pago", undefined, "WEBHOOK_PAYMENT_MISMATCH");
   }
   const result = await confirmPaymentAttemptInTransaction(context, client, attempt.id, { paymentIntentId: stripePaymentIntentId(session), rotateOrderAccessToken: false });
-  return { handled: true, matched: true, order_id: result.order_id, refunded_oversell: result.refunded_oversell };
+  return {
+    handled: true,
+    matched: true,
+    order_id: result.order_id,
+    refunded_oversell: result.refunded_oversell,
+    refund_operation_id: result.refund_operation_id,
+  };
 }
 
 async function processSkydropxEvent(client: pg.PoolClient, payload: Record<string, any>): Promise<Record<string, unknown>> {
@@ -218,6 +224,8 @@ export async function registerWebhooks(app: FastifyInstance, context: AppContext
       payload: event,
     };
     const result = await deliverOnce(context, identity, (client) => processStripeEvent(context, client, event));
+    const refundOperationId = result.value?.refund_operation_id;
+    if (typeof refundOperationId === "string") await processOversellRefund(context, refundOperationId);
     return { received: true, duplicate: result.duplicate, ...(result.value ?? {}) };
   });
 

@@ -316,7 +316,135 @@ export type ConfirmPaymentResult = {
   order_id: string | null;
   order_access_token: string | null;
   refunded_oversell: boolean;
+  refund_operation_id: string | null;
 };
+
+function isDefinitiveStripeRefundFailure(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { statusCode?: unknown; type?: unknown };
+  if (candidate.type === "StripeCardError" || candidate.type === "StripeInvalidRequestError" || candidate.type === "StripeAuthenticationError") {
+    return true;
+  }
+  return typeof candidate.statusCode === "number" && candidate.statusCode >= 400 && candidate.statusCode < 500 && candidate.statusCode !== 409;
+}
+
+type OversellRefundOperation = {
+  id: string;
+  payment_attempt_id: string;
+  payment_transaction_id: string;
+  amount_mxn: number;
+  provider_charge_id: string | null;
+};
+
+async function finalizeOversellRefund(
+  context: AppContext,
+  operation: OversellRefundOperation,
+  refundId: string,
+  status: "succeeded" | "failed",
+  providerRefundId: string | null = null,
+): Promise<void> {
+  const client = await context.database.connect();
+  try {
+    await client.query("begin");
+    await client.query(
+      "update refunds set status=$2,provider_refund_id=coalesce($3,provider_refund_id),updated_at=now() where id=$1 and status='processing'",
+      [refundId, status, providerRefundId],
+    );
+    if (status === "succeeded") {
+      await client.query(
+        "update payment_transactions set status='refunded',refunded_amount_mxn=amount_mxn,updated_at=now() where id=$1",
+        [operation.payment_transaction_id],
+      );
+      await client.query(
+        "update payment_attempts set status='refunded',failure_reason='oversell',updated_at=now() where id=$1 and status='refund_pending'",
+        [operation.payment_attempt_id],
+      );
+    } else {
+      await client.query(
+        "update payment_attempts set status='refund_failed',failure_reason='oversell_refund_failed',updated_at=now() where id=$1 and status='refund_pending'",
+        [operation.payment_attempt_id],
+      );
+    }
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Claims and settles one durable oversell refund operation. Stripe calls use
+ * the refund UUID as their idempotency key, so a retry after an unknown
+ * response cannot create a second refund.
+ */
+export async function processOversellRefund(context: AppContext, refundId: string): Promise<string> {
+  const client = await context.database.connect();
+  let operation: OversellRefundOperation | undefined;
+  try {
+    await client.query("begin");
+    const result = await client.query<OversellRefundOperation>(`
+      select r.id,pt.payment_attempt_id,r.payment_transaction_id,r.amount_mxn,pt.provider_charge_id
+      from refunds r
+      join payment_transactions pt on pt.id=r.payment_transaction_id
+      where r.id=$1 and r.reason='oversell'
+        and (r.status in ('pending','unknown') or (r.status='processing' and r.updated_at < now()-interval '1 minute'))
+      for update skip locked
+    `, [refundId]);
+    operation = result.rows[0];
+    if (!operation) {
+      await client.query("rollback");
+      return "skipped";
+    }
+    await client.query("update refunds set status='processing',updated_at=now() where id=$1", [refundId]);
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  if (!operation.provider_charge_id) {
+    await finalizeOversellRefund(context, operation, refundId, "failed");
+    return "failed";
+  }
+  const providerChargeId = operation.provider_charge_id;
+
+  try {
+    const refund = config.STRIPE_MODE === "live"
+      ? await withProviderMetrics("stripe", () => context.stripe.refunds.create(
+        { payment_intent: providerChargeId, amount: Number(operation.amount_mxn) * 100, reason: "requested_by_customer" },
+        { idempotencyKey: `oversell-refund:${refundId}` },
+      ))
+      : { id: `mock_refund_${refundId}` };
+    await finalizeOversellRefund(context, operation, refundId, "succeeded", refund.id);
+    return "succeeded";
+  } catch (error) {
+    const status = isDefinitiveStripeRefundFailure(error) ? "failed" : "unknown";
+    if (status === "failed") {
+      await finalizeOversellRefund(context, operation, refundId, "failed");
+    } else {
+      await context.database.query(
+        "update refunds set status='unknown',updated_at=now() where id=$1 and status='processing'",
+        [refundId],
+      );
+    }
+    return status;
+  }
+}
+
+export async function recoverOversellRefunds(context: AppContext): Promise<void> {
+  const pending = await context.database.query<{ id: string }>(`
+    select id from refunds
+    where reason='oversell'
+      and (status in ('pending','unknown') or (status='processing' and updated_at < now()-interval '1 minute'))
+    order by updated_at
+    limit 50
+  `);
+  for (const refund of pending.rows) await processOversellRefund(context, refund.id);
+}
 
 /** Settles a payment while the caller owns the transaction and attempt lock. */
 export async function confirmPaymentAttemptInTransaction(
@@ -340,6 +468,7 @@ export async function confirmPaymentAttemptInTransaction(
         ? null
         : await replaceOrderAccessToken(client, order.id),
       refunded_oversell: false,
+      refund_operation_id: null,
     };
   }
   if (attempt.status !== "pending") throw new HttpError(409, "Intento no confirmable");
@@ -354,9 +483,18 @@ export async function confirmPaymentAttemptInTransaction(
     if (!chargeId) throw new HttpError(409, "Stripe no confirmó un PaymentIntent válido");
   }
   if (!Array.isArray(attempt.metadata?.reservations) || attempt.metadata.reservations_released) {
-    if (config.STRIPE_MODE === "live" && chargeId) await withProviderMetrics("stripe", () => context.stripe.refunds.create({ payment_intent: chargeId })).catch(() => undefined);
-    attempt = (await client.query("update payment_attempts set status='refunded',failure_reason='oversell',updated_at=now() where id=$1 returning *", [attempt.id])).rows[0];
-    return { attempt, order_id: null, order_access_token: null, refunded_oversell: true };
+    const transactionId = randomUUID();
+    const refundId = randomUUID();
+    await client.query(`
+      insert into payment_transactions(id,payment_attempt_id,checkout_session_id,status,amount_mxn,currency,provider,provider_charge_id)
+      values($1,$2,$3,'refund_pending',$4,$5,$6,$7)
+    `, [transactionId, attempt.id, attempt.checkout_session_id, attempt.amount_mxn, attempt.currency, attempt.provider, chargeId]);
+    await client.query(
+      "insert into refunds(id,payment_transaction_id,reason,amount_mxn,status,provider_refund_id) values($1,$2,'oversell',$3,'pending',null)",
+      [refundId, transactionId, attempt.amount_mxn],
+    );
+    attempt = (await client.query("update payment_attempts set status='refund_pending',provider_charge_id=$2,failure_reason='oversell',updated_at=now() where id=$1 returning *", [attempt.id, chargeId])).rows[0];
+    return { attempt, order_id: null, order_access_token: null, refunded_oversell: true, refund_operation_id: refundId };
   }
   attempt = (await client.query("update payment_attempts set status='succeeded',provider_charge_id=$2,updated_at=now() where id=$1 returning *", [attempt.id, chargeId])).rows[0];
   await client.query(`
@@ -364,7 +502,7 @@ export async function confirmPaymentAttemptInTransaction(
     values($1,$2,$3,'succeeded',$4,$5,$6,$7)
   `, [randomUUID(), attempt.id, attempt.checkout_session_id, attempt.amount_mxn, attempt.currency, attempt.provider, chargeId]);
   const createdOrder = await createOrder(client, checkout, attempt);
-  return { attempt, order_id: createdOrder.orderId, order_access_token: createdOrder.orderAccessToken, refunded_oversell: false };
+  return { attempt, order_id: createdOrder.orderId, order_access_token: createdOrder.orderAccessToken, refunded_oversell: false, refund_operation_id: null };
 }
 
 export async function registerCommerce(app: FastifyInstance, context: AppContext): Promise<void> {
@@ -539,6 +677,7 @@ export async function registerCommerce(app: FastifyInstance, context: AppContext
       await checkoutForPaymentAttempt(context, request, attempt, client);
       const result = await confirmPaymentAttemptInTransaction(context, client, attempt.id);
       await client.query("commit");
+      if (result.refund_operation_id) await processOversellRefund(context, result.refund_operation_id);
       if (result.order_id) for (const socket of context.sockets) if (socket.readyState === 1) socket.send(JSON.stringify({ type: "sale_confirmed", order_id: result.order_id, amount_mxn: result.attempt.amount_mxn }));
       return { ...result, attempt: attemptResponse(result.attempt) };
     } catch (error) {

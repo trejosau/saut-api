@@ -6,7 +6,7 @@ import { cleanupOrphanedAssets, registerAssets } from "../modules/assets.js";
 import { registerAuth } from "../modules/auth.js";
 import { registerAdvancedAuth } from "../modules/advanced-auth.js";
 import { registerCatalog } from "../modules/catalog.js";
-import { expirePaymentReservations, registerCommerce } from "../modules/commerce.js";
+import { expirePaymentReservations, recoverOversellRefunds, registerCommerce } from "../modules/commerce.js";
 import { registerOperations } from "../modules/operations.js";
 import { registerSupportAnalytics } from "../modules/support-analytics.js";
 import { registerWebhooks } from "../modules/webhooks.js";
@@ -71,8 +71,8 @@ class CommerceRouteRegistrar extends RouteRegistrar implements OnModuleInit {
 }
 
 @Injectable()
-class PaymentReservationExpiryWorker implements OnApplicationBootstrap, OnApplicationShutdown {
-  private readonly logger = new Logger(PaymentReservationExpiryWorker.name);
+class PaymentSettlementRecoveryWorker implements OnApplicationBootstrap, OnApplicationShutdown {
+  private readonly logger = new Logger(PaymentSettlementRecoveryWorker.name);
   private timer?: NodeJS.Timeout;
   private running?: Promise<void>;
 
@@ -81,12 +81,20 @@ class PaymentReservationExpiryWorker implements OnApplicationBootstrap, OnApplic
   onApplicationBootstrap(): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
-      if (this.running) return;
-      this.running = expirePaymentReservations(this.context)
-        .catch((error: unknown) => this.logger.error(error))
-        .finally(() => { this.running = undefined; });
+      this.runRecovery();
     }, 60_000);
     this.timer.unref();
+  }
+
+  private runRecovery(): void {
+    if (this.running) return;
+    this.running = Promise.all([
+      expirePaymentReservations(this.context),
+      recoverOversellRefunds(this.context),
+    ])
+      .then(() => undefined)
+      .catch((error: unknown) => this.logger.error(error))
+      .finally(() => { this.running = undefined; });
   }
 
   async onApplicationShutdown(): Promise<void> {
@@ -98,7 +106,7 @@ class PaymentReservationExpiryWorker implements OnApplicationBootstrap, OnApplic
   }
 }
 
-@Module({ providers: [CommerceRouteRegistrar, PaymentReservationExpiryWorker] })
+@Module({ providers: [CommerceRouteRegistrar, PaymentSettlementRecoveryWorker] })
 export class CommerceModule {}
 
 @Injectable()
