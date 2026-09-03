@@ -21,10 +21,7 @@ const productionEnvironment = {
   MIGRATION_DROP_LEGACY_DATABASES: "false",
   RATE_LIMIT_FAIL_OPEN: "false",
   STRIPE_MODE: "live",
-  STRIPE_SECRET_KEY: "sk_live_production",
-  STRIPE_WEBHOOK_SECRET: "whsec_production",
   SKYDROPX_MODE: "live",
-  SKYDROPX_WEBHOOK_SECRET: "skydropx-production"
 } satisfies NodeJS.ProcessEnv;
 
 describe("parseConfig", () => {
