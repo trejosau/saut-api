@@ -72,6 +72,7 @@ describe("runtime observability metrics", () => {
 describe("health, readiness and metrics endpoints", () => {
   const database = {
     ping: vi.fn(),
+    query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
     poolMetrics: vi.fn(() => ({
       totalConnections: 1,
       idleConnections: 1,
