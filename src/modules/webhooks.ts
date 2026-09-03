@@ -96,10 +96,11 @@ export function validateSkydropxPayload(payload: unknown): Record<string, any> {
 async function recordWebhookFailure(context: AppContext, identity: WebhookIdentity, error: unknown): Promise<void> {
   const message = error instanceof Error ? error.message.slice(0, 1000) : "Error de procesamiento";
   await context.database.query(`
-    update webhook_events
-    set status='failed', last_error=$3, updated_at=now()
-    where provider=$1 and event_id=$2 and status='processing'
-  `, [identity.provider, identity.eventId, message]).catch(() => undefined);
+    insert into webhook_events(id,provider,event_id,event_id_source,event_type,payload,payload_sha256,status,attempts,last_error,updated_at)
+    values($1,$2,$3,$4,$5,$6,$7,'failed',1,$8,now())
+    on conflict(provider,event_id) do update set status='failed', attempts=webhook_events.attempts+1,
+      last_error=excluded.last_error, updated_at=now()
+  `, [randomUUID(), identity.provider, identity.eventId, identity.eventIdSource, identity.eventType, identity.payload, identity.payloadSha256, message]).catch(() => undefined);
 }
 
 async function deliverOnce<T>(
@@ -174,7 +175,7 @@ async function processStripeEvent(context: AppContext, client: pg.PoolClient, ev
   if (session.currency && session.currency.toLowerCase() !== String(attempt.currency).toLowerCase()) {
     throw new HttpError(409, "La moneda Stripe no coincide con el intento de pago", undefined, "WEBHOOK_PAYMENT_MISMATCH");
   }
-  const result = await confirmPaymentAttemptInTransaction(context, client, attempt.id, { paymentIntentId: stripePaymentIntentId(session) });
+  const result = await confirmPaymentAttemptInTransaction(context, client, attempt.id, { paymentIntentId: stripePaymentIntentId(session), rotateOrderAccessToken: false });
   return { handled: true, matched: true, order_id: result.order_id, refunded_oversell: result.refunded_oversell };
 }
 

@@ -444,7 +444,7 @@ export async function buildFastifyServer(context: AppContext): Promise<FastifyIn
       },
     },
     bodyLimit: config.REQUEST_BODY_LIMIT_BYTES,
-    trustProxy: true,
+    trustProxy: (_address, hop) => hop < config.TRUST_PROXY_HOPS,
     requestIdHeader: "x-request-id",
   });
   try {

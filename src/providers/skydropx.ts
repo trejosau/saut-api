@@ -173,7 +173,8 @@ export async function quoteNational(
     } }),
   }, undefined, "skydropx");
   if (!response.ok) {
-    throw new HttpError(503, `Skydropx quotation falló (${response.status}): ${await response.text()}`);
+    await response.text();
+    throw new HttpError(503, `Skydropx quotation falló (${response.status})`);
   }
 
   let payload: unknown = await response.json();
@@ -255,7 +256,8 @@ export async function createNationalShipment(
     } }),
   }, undefined, "skydropx");
   if (!response.ok) {
-    throw new HttpError(503, `Skydropx shipment falló (${response.status}): ${await response.text()}`);
+    await response.text();
+    throw new HttpError(503, `Skydropx shipment falló (${response.status})`);
   }
 
   const payload: unknown = await response.json();

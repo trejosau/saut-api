@@ -270,4 +270,75 @@ describe("email login challenge lifecycle", () => {
     expect(response.statusCode).toBe(429);
     expect(database.query).toHaveBeenCalledTimes(1);
   });
+
+  it("consumes a valid challenge only once under concurrent verification", async () => {
+    const challengeId = "55555555-5555-4555-8555-555555555555";
+    const code = "123456";
+    let reads = 0;
+    let consumed = 0;
+    let releaseReads!: () => void;
+    const bothRead = new Promise<void>((resolve) => { releaseReads = resolve; });
+    database.query.mockImplementation(async (sql: string) => {
+      const normalized = sql.replaceAll(/\s+/g, " ").toLowerCase();
+      if (normalized.includes("from login_challenges")) {
+        reads += 1;
+        if (reads === 2) releaseReads();
+        await bothRead;
+        return { rows: [{ id: challengeId, code_hash: hmac(`${challengeId}:${code}`), attempts: 0, max_attempts: 5 }], rowCount: 1 };
+      }
+      if (normalized.includes("update login_challenges set consumed_at")) {
+        consumed += 1;
+        return consumed === 1 ? { rows: [{ id: challengeId }], rowCount: 1 } : { rows: [], rowCount: 0 };
+      }
+      if (normalized.includes("from account_identities")) {
+        return { rows: [{ id: accountId, actor_type: "customer", primary_email: "user@example.com", status: "active" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+    const app = await authRoutes();
+
+    const responses = await Promise.all([
+      app.inject({ method: "POST", url: "/auth/email/verify", payload: { email: "user@example.com", code } }),
+      app.inject({ method: "POST", url: "/auth/email/verify", payload: { email: "user@example.com", code } }),
+    ]);
+    await app.close();
+
+    expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 401]);
+    expect(consumed).toBe(2);
+  });
+
+  it("caps concurrent invalid-code attempts at the challenge maximum", async () => {
+    const challengeId = "66666666-6666-4666-8666-666666666666";
+    const requestCount = 20;
+    let reads = 0;
+    let attemptUpdates = 0;
+    let releaseReads!: () => void;
+    const allRead = new Promise<void>((resolve) => { releaseReads = resolve; });
+    database.query.mockImplementation(async (sql: string) => {
+      const normalized = sql.replaceAll(/\s+/g, " ").toLowerCase();
+      if (normalized.includes("from login_challenges")) {
+        reads += 1;
+        if (reads === requestCount) releaseReads();
+        await allRead;
+        return { rows: [{ id: challengeId, code_hash: hmac(`${challengeId}:654321`), attempts: 0, max_attempts: 5 }], rowCount: 1 };
+      }
+      if (normalized.includes("update login_challenges set attempts")) {
+        attemptUpdates += 1;
+        return attemptUpdates <= 5
+          ? { rows: [{ attempts: attemptUpdates, max_attempts: 5 }], rowCount: 1 }
+          : { rows: [], rowCount: 0 };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+    const app = await authRoutes();
+
+    const responses = await Promise.all(Array.from({ length: requestCount }, () => app.inject({
+      method: "POST", url: "/auth/email/verify", payload: { email: "user@example.com", code: "123456" },
+    })));
+    await app.close();
+
+    expect(responses.filter((response) => response.statusCode === 401)).toHaveLength(5);
+    expect(responses.filter((response) => response.statusCode === 429)).toHaveLength(15);
+    expect(attemptUpdates).toBe(requestCount);
+  });
 });

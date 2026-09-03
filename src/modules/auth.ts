@@ -278,10 +278,20 @@ export async function registerAuth(app: FastifyInstance, context: AppContext): P
     if (!row) throw new HttpError(401, "Código inválido o expirado");
     if (row.attempts >= row.max_attempts) throw new HttpError(429, "Demasiados intentos");
     if (!secureEqual(row.code_hash, hmac(`${row.id}:${code}`))) {
-      await context.database.query("update login_challenges set attempts = attempts + 1 where id = $1", [row.id]);
+      const attempt = await context.database.query<{ attempts: number; max_attempts: number }>(`
+        update login_challenges set attempts = attempts + 1
+        where id = $1 and consumed_at is null and expires_at > now() and attempts < max_attempts
+        returning attempts, max_attempts
+      `, [row.id]);
+      if (!attempt.rows[0]) throw new HttpError(429, "Demasiados intentos");
       throw new HttpError(401, "Código inválido o expirado");
     }
-    await context.database.query("update login_challenges set consumed_at = now() where id = $1", [row.id]);
+    const consumed = await context.database.query<{ id: string }>(`
+      update login_challenges set consumed_at = now()
+      where id = $1 and consumed_at is null and expires_at > now()
+      returning id
+    `, [row.id]);
+    if (!consumed.rows[0]) throw new HttpError(401, "Código inválido o expirado");
     const result = await findOrCreateEmailAccount(context, email);
     return issueSession(context, result.account, request, result.created);
   };

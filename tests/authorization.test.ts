@@ -201,6 +201,41 @@ describe("authorization boundaries", () => {
     await app.close();
   });
 
+  it("does not expose internal support messages to an authorized guest", async () => {
+    database.query.mockImplementation(async (sql: string) => {
+      const normalized = sql.replaceAll(/\s+/g, " ").toLowerCase();
+      if (normalized.includes("select * from support_cases where id=$1")) {
+        return { rows: [{ id: "case-1", guest_email: "owner@example.com", guest_order_code: "ABC12345" }], rowCount: 1 };
+      }
+      if (normalized.includes("from support_case_messages")) {
+        const messages = normalized.includes("is_internal=false")
+          ? [{ id: "message-public", message: "Visible", is_internal: false }]
+          : [
+            { id: "message-public", message: "Visible", is_internal: false },
+            { id: "message-internal", message: "INTERNAL: refund approval note", is_internal: true },
+          ];
+        return {
+          rows: messages,
+          rowCount: messages.length,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const app = Fastify({ logger: false });
+    errorHandler(app);
+    await registerSupportAnalytics(app, context());
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/support/cases/case-1?guest_email=owner@example.com&guest_order_code=ABC12345",
+    });
+    await app.close();
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().messages).toEqual([{ id: "message-public", message: "Visible", is_internal: false, attachments: [] }]);
+    expect(String(database.query.mock.calls.find(([sql]) => String(sql).includes("support_case_messages"))?.[0])).toContain("is_internal=false");
+  });
+
   it("protects inventory movement history and keeps public inventory projection non-sensitive", async () => {
     const app = Fastify({ logger: false });
     errorHandler(app);

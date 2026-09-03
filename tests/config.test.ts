@@ -45,4 +45,15 @@ describe("parseConfig", () => {
     expect(() => parseConfig({ ...productionEnvironment, STRIPE_SECRET_KEY: "sk_test_mock" })).toThrowError();
     expect(() => parseConfig({ ...productionEnvironment, SKYDROPX_WEBHOOK_SECRET: "skydropx_wh_mock" })).toThrowError();
   });
+
+  it("rejects empty and example placeholder auth secrets in production", () => {
+    expect(() => parseConfig({ ...productionEnvironment, AUTH_INTERNAL_API_KEY: "" })).toThrowError();
+    expect(() => parseConfig({ ...productionEnvironment, AUTH_TOKEN_SECRET: "CHANGE_ME_AUTH_TOKEN_SECRET" })).toThrowError();
+  });
+
+  it("defaults to not trusting forwarded proxy headers", () => {
+    expect(parseConfig({ NODE_ENV: "test" }).TRUST_PROXY_HOPS).toBe(0);
+    expect(parseConfig({ ...productionEnvironment, TRUST_PROXY_HOPS: "1" }).TRUST_PROXY_HOPS).toBe(1);
+    expect(() => parseConfig({ ...productionEnvironment, TRUST_PROXY_HOPS: "11" })).toThrowError();
+  });
 });

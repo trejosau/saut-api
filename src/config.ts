@@ -44,6 +44,7 @@ const schema = z.object({
   RATE_LIMIT_GLOBAL_MAX: z.coerce.number().int().positive().default(120),
   RATE_LIMIT_GLOBAL_WINDOW_SEC: z.coerce.number().int().positive().default(1),
   RATE_LIMIT_FAIL_OPEN: booleanValue.default(true),
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(0),
   REQUEST_BODY_LIMIT_BYTES: z.coerce.number().int().positive().default(2 * 1024 * 1024),
   PAGINATION_MAX: z.coerce.number().int().positive().default(200),
   EXTERNAL_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
@@ -119,6 +120,24 @@ const schema = z.object({
         code: z.ZodIssueCode.custom,
         path: [path],
         message: "must be configured with a non-development value in production"
+      });
+    }
+  }
+
+  const requiredProductionSecrets: Array<keyof typeof values> = [
+    "AUTH_CODE_SECRET",
+    "AUTH_TOKEN_SECRET",
+    "AUTH_INTERNAL_API_KEY",
+    "ASSETS_SIGNING_SECRET",
+    "ASSETS_INTERNAL_API_KEY",
+  ];
+  for (const path of requiredProductionSecrets) {
+    const value = String(values[path] ?? "").trim();
+    if (value.length < 16 || /^(?:change_me|replace_me|todo|<[^>]+>)/i.test(value)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [path],
+        message: "must be a non-placeholder secret of at least 16 characters in production"
       });
     }
   }

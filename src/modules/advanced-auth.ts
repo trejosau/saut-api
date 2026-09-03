@@ -389,7 +389,8 @@ export async function registerAdvancedAuth(app: FastifyInstance, context: AppCon
   app.get("/admin/auth/mfa-policy", async () => mfaPolicy(context));
   app.put("/admin/auth/mfa-policy", async (request) => {
     const actor = request.actor ?? await authenticate(request);
-    requireStepUp(actor);
+    const policy = await mfaPolicy(context);
+    requireStepUp(actor, policy.step_up_ttl_sec);
     const body = asObject(request.body);
     const mode = policyMode.parse(body.mode);
     const requiredRoles = z.array(z.string().trim().min(1).max(64)).max(50).parse(body.required_roles ?? []);

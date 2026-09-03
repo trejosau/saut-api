@@ -13,6 +13,7 @@ import {
   generateRecoveryCodes,
   generateTotpCode,
   generateTotpSecret,
+  requireStepUp,
   registerAdvancedAuth,
   requiresMfa,
   verifyTotpCode,
@@ -45,6 +46,19 @@ describe("TOTP and recovery-code primitives", () => {
     expect(requiresMfa({ mode: "required_all", required_roles: [], step_up_ttl_sec: 300 }, ["customer"])).toBe(true);
     expect(requiresMfa({ mode: "required_roles", required_roles: ["admin"], step_up_ttl_sec: 300 }, ["admin"])).toBe(true);
     expect(requiresMfa({ mode: "required_roles", required_roles: ["admin"], step_up_ttl_sec: 300 }, ["customer"])).toBe(false);
+  });
+
+  it("honors the policy TTL when validating a step-up", () => {
+    const actor = {
+      accountId,
+      actorType: "admin",
+      sessionId,
+      roles: ["admin"],
+      permissions: [],
+      stepUpVerifiedAt: new Date(Date.now() - 120_000),
+    };
+    expect(() => requireStepUp(actor, 60)).toThrowError(expect.objectContaining({ statusCode: 403 }));
+    expect(() => requireStepUp(actor, 180)).not.toThrow();
   });
 });
 

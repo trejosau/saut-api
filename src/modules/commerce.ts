@@ -178,11 +178,16 @@ async function createOrder(client: pg.PoolClient, checkout: any, attempt: any): 
   const primaryDrop = items.find((item) => item.drop_id)?.drop_id ?? null;
   let dropNumber: number | null = null;
   if (primaryDrop) {
+    const drop = (await client.query<{ capacity_total: number | null }>("select capacity_total from drops where id=$1 for update", [primaryDrop])).rows[0];
+    if (!drop) throw new HttpError(409, "Drop no disponible");
     const counter = await client.query<{ last_number: number }>(`
       insert into drop_counters(drop_id,last_number) values($1,1)
       on conflict(drop_id) do update set last_number=drop_counters.last_number+1,updated_at=now() returning last_number
     `, [primaryDrop]);
     dropNumber = counter.rows[0]?.last_number ?? null;
+    if (drop.capacity_total !== null && dropNumber !== null && dropNumber > drop.capacity_total) {
+      throw new HttpError(409, "La capacidad del drop se agotó");
+    }
   }
   const orderId = randomUUID();
   const orderAccessToken = randomToken(32);
@@ -289,11 +294,20 @@ async function stripeCheckout(context: AppContext, checkout: any, attemptId: str
 }
 
 export async function expirePaymentReservations(context: AppContext): Promise<void> {
-  const expired = await context.database.query<any>("select * from payment_attempts where status='pending' and created_at < now()-interval '30 minutes' limit 100");
-  for (const attempt of expired.rows) {
-    const client = await context.database.connect();
-    try { await client.query("begin"); await releaseReservations(client, attempt, "expired"); await client.query("update payment_attempts set status='expired',updated_at=now() where id=$1", [attempt.id]); await client.query("commit"); }
-    catch (error) { await client.query("rollback"); throw error; } finally { client.release(); }
+  const client = await context.database.connect();
+  try {
+    await client.query("begin");
+    const expired = await client.query<any>("select * from payment_attempts where status='pending' and created_at < now()-interval '30 minutes' order by created_at limit 100 for update skip locked");
+    for (const attempt of expired.rows) {
+      await releaseReservations(client, attempt, "expired");
+      await client.query("update payment_attempts set status='expired',updated_at=now() where id=$1 and status='pending'", [attempt.id]);
+    }
+    await client.query("commit");
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
   }
 }
 
@@ -309,7 +323,7 @@ export async function confirmPaymentAttemptInTransaction(
   context: AppContext,
   client: pg.PoolClient,
   attemptId: string,
-  providerConfirmation?: { paymentIntentId?: string | null },
+  providerConfirmation?: { paymentIntentId?: string | null; rotateOrderAccessToken?: boolean },
 ): Promise<ConfirmPaymentResult> {
   let attempt = (await client.query("select * from payment_attempts where id=$1 for update", [attemptId])).rows[0];
   if (!attempt) throw new HttpError(404, "Intento de pago no encontrado");
@@ -322,7 +336,9 @@ export async function confirmPaymentAttemptInTransaction(
     return {
       attempt: { ...attempt },
       order_id: order.id,
-      order_access_token: await replaceOrderAccessToken(client, order.id),
+      order_access_token: providerConfirmation?.rotateOrderAccessToken === false
+        ? null
+        : await replaceOrderAccessToken(client, order.id),
       refunded_oversell: false,
     };
   }
@@ -334,7 +350,8 @@ export async function confirmPaymentAttemptInTransaction(
     if (session.payment_status !== "paid") throw new HttpError(409, "El pago aún no está confirmado");
     chargeId = typeof session.payment_intent === "string"
       ? session.payment_intent
-      : String((session.payment_intent as any)?.id ?? session.id);
+      : String((session.payment_intent as any)?.id ?? "");
+    if (!chargeId) throw new HttpError(409, "Stripe no confirmó un PaymentIntent válido");
   }
   if (!Array.isArray(attempt.metadata?.reservations) || attempt.metadata.reservations_released) {
     if (config.STRIPE_MODE === "live" && chargeId) await withProviderMetrics("stripe", () => context.stripe.refunds.create({ payment_intent: chargeId })).catch(() => undefined);
