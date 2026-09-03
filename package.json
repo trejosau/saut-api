@@ -11,6 +11,7 @@
   "scripts": {
     "dev": "npm run prisma:deploy && npm run bootstrap && tsx watch src/index.ts",
     "start": "node dist/src/index.js",
+    "start:prod": "npm run prisma:deploy && node dist/src/index.js",
     "build": "npm run prisma:generate && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src tests --max-warnings=0",
