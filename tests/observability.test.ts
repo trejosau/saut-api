@@ -83,8 +83,7 @@ describe("health, readiness and metrics endpoints", () => {
   const redis = {
     status: "ready",
     ping: vi.fn(),
-    incr: vi.fn().mockResolvedValue(1),
-    expire: vi.fn().mockResolvedValue(1),
+    eval: vi.fn().mockResolvedValue(1),
   };
   const s3 = { send: vi.fn().mockResolvedValue({}) };
   let application!: Awaited<ReturnType<typeof createApp>>;
@@ -133,5 +132,11 @@ describe("health, readiness and metrics endpoints", () => {
       http: { requestsTotal: expect.any(Number), latencyMs: { p95: expect.any(Number) } },
       dbPool: { totalConnections: 1, idleConnections: 1, waitingRequests: 0, maxConnections: 10 },
     });
+    expect(redis.eval).toHaveBeenCalledWith(
+      expect.stringContaining("redis.call('INCR'"),
+      1,
+      expect.stringMatching(/^rate:global:/),
+      String(config.RATE_LIMIT_GLOBAL_WINDOW_SEC + 1),
+    );
   });
 });

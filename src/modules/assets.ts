@@ -149,8 +149,18 @@ function isExpired(value: Date | string | null | undefined): boolean {
   return !value || new Date(value).getTime() <= Date.now();
 }
 
+async function storageSend<T>(context: AppContext, command: any): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), config.EXTERNAL_REQUEST_TIMEOUT_MS);
+  try {
+    return await context.s3.send(command, { abortSignal: controller.signal }) as T;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function deleteObject(context: AppContext, key: string): Promise<void> {
-  await context.s3.send(new DeleteObjectsCommand({
+  await storageSend(context, new DeleteObjectsCommand({
     Bucket: config.S3_BUCKET,
     Delete: { Objects: [{ Key: key }], Quiet: true },
   }));
@@ -158,7 +168,7 @@ async function deleteObject(context: AppContext, key: string): Promise<void> {
 
 async function deleteObjectBatch(context: AppContext, keys: string[]): Promise<number> {
   if (keys.length === 0) return 0;
-  await context.s3.send(new DeleteObjectsCommand({
+  await storageSend(context, new DeleteObjectsCommand({
     Bucket: config.S3_BUCKET,
     Delete: { Objects: keys.map((Key) => ({ Key })), Quiet: true },
   }));
@@ -197,7 +207,7 @@ export async function cleanupOrphanedAssets(
   let continuationToken: string | undefined;
   let deletedObjects = 0;
   do {
-    const listed = await context.s3.send(new ListObjectsV2Command({ Bucket: config.S3_BUCKET, ContinuationToken: continuationToken }));
+    const listed = await storageSend<{ Contents?: Array<{ Key?: string; LastModified?: Date }>; IsTruncated?: boolean; NextContinuationToken?: string }>(context, new ListObjectsV2Command({ Bucket: config.S3_BUCKET, ContinuationToken: continuationToken }));
     const orphanKeys = (listed.Contents ?? [])
       .filter((object) => object.Key && !knownKeys.has(object.Key) && object.LastModified && object.LastModified.getTime() <= cutoff)
       .map((object) => object.Key!);
@@ -265,7 +275,7 @@ export async function registerAssets(app: FastifyInstance, context: AppContext):
     }
     let result: { ETag?: string };
     try {
-      result = await context.s3.send(new PutObjectCommand({ Bucket: config.S3_BUCKET, Key: asset.object_key, Body: body, ContentType: contentType }));
+      result = await storageSend(context, new PutObjectCommand({ Bucket: config.S3_BUCKET, Key: asset.object_key, Body: body, ContentType: contentType }));
     } catch (error) {
       await context.database.query("update assets set upload_status='failed',updated_at=now() where id=$1 and upload_status='uploading'", [asset.id]).catch(() => undefined);
       throw error;
@@ -277,7 +287,7 @@ export async function registerAssets(app: FastifyInstance, context: AppContext):
     const asset = (await context.database.query<AssetRow>("select * from assets where id=$1", [request.params.asset_id])).rows[0];
     if (!asset || !isReady(asset)) throw new HttpError(404, "Asset no encontrado");
     if (asset.visibility !== "public") validateSignature(request.params.asset_id, asObject(request.query), "read");
-    const object = await context.s3.send(new GetObjectCommand({ Bucket: config.S3_BUCKET, Key: asset.object_key }));
+    const object = await storageSend<{ Body?: any }>(context, new GetObjectCommand({ Bucket: config.S3_BUCKET, Key: asset.object_key }));
     if (!object.Body) throw new HttpError(404, "Contenido del asset no encontrado");
     reply.type(asset.content_type).header("content-length", String(asset.size_bytes)).header("content-disposition", asset.content_type === "application/octet-stream" ? "attachment" : "inline").header("cache-control", asset.visibility === "public" ? "public, max-age=31536000, immutable" : "private, no-store");
     return reply.send(object.Body);

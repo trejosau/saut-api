@@ -394,11 +394,17 @@ export async function createContext(): Promise<AppContext> {
   }
 }
 
+const GLOBAL_RATE_LIMIT_SCRIPT = "local count=redis.call('INCR',KEYS[1]);if count==1 then redis.call('EXPIRE',KEYS[1],ARGV[1])end;return count";
+
 async function globalRateLimit(request: FastifyRequest): Promise<void> {
   const key = `rate:global:${request.ip}:${Math.floor(Date.now() / (config.RATE_LIMIT_GLOBAL_WINDOW_SEC * 1000))}`;
   try {
-    const count = await request.server.context.redis.incr(key);
-    if (count === 1) await request.server.context.redis.expire(key, config.RATE_LIMIT_GLOBAL_WINDOW_SEC + 1);
+    const count = Number(await request.server.context.redis.eval(
+      GLOBAL_RATE_LIMIT_SCRIPT,
+      1,
+      key,
+      String(config.RATE_LIMIT_GLOBAL_WINDOW_SEC + 1),
+    ));
     if (count > config.RATE_LIMIT_GLOBAL_MAX) throw new HttpError(429, "Demasiadas solicitudes");
   } catch (error) {
     if (error instanceof HttpError) throw error;

@@ -30,6 +30,24 @@ function normalizedOrderCode(value: unknown): string {
   return String(value ?? "").replaceAll("-", "").toUpperCase();
 }
 
+function validateSupportMessage(body: Record<string, any>): void {
+  if (typeof body.message !== "string" || body.message.trim().length === 0 || body.message.length > 4_000) {
+    throw new HttpError(422, "El mensaje de soporte es requerido y debe tener máximo 4000 caracteres");
+  }
+  if (Array.isArray(body.attachments) && body.attachments.length > 10) {
+    throw new HttpError(422, "El mensaje de soporte admite máximo 10 adjuntos");
+  }
+}
+
+function validateSupportSubject(body: Record<string, any>): void {
+  if (body.subject !== undefined && body.subject !== null && typeof body.subject !== "string") {
+    throw new HttpError(422, "El asunto de soporte es inválido");
+  }
+  if (typeof body.subject === "string" && body.subject.length > 200) {
+    throw new HttpError(422, "El asunto de soporte debe tener máximo 200 caracteres");
+  }
+}
+
 async function accountEmail(context: AppContext, accountId: string): Promise<string> {
   const result = await context.database.query<{ primary_email: string | null }>(
     "select primary_email from accounts where id=$1",
@@ -65,7 +83,7 @@ async function caseDetail(context: AppContext, id: string, includeInternal = fal
 
 async function ensureCaseAccess(context:AppContext,request:FastifyRequest,supportCase:any):Promise<void>{if(request.url.startsWith("/admin/"))return;const actor=await optionalActor(request);if(actor&&supportCase.account_id===actor.accountId)return;const query=asObject(request.query);const email=String(query.guest_email??"").toLowerCase();const code=String(query.guest_order_code??"").replaceAll("-","").toUpperCase();if(email&&email===String(supportCase.guest_email??supportCase.contact_email).toLowerCase()&&code&&code===String(supportCase.guest_order_code??supportCase.linked_order_code??"").replaceAll("-","").toUpperCase())return;throw new HttpError(403,"No tienes acceso a este caso");}
 
-async function addMessage(context:AppContext,caseId:string,body:Record<string,any>,sender:{type:string;accountId?:string;label?:string},internal=false,includeInternal=false):Promise<any>{const id=randomUUID();await context.database.query("insert into support_case_messages(id,case_id,sender_type,sender_account_id,sender_label,message,is_internal)values($1,$2,$3,$4,$5,$6,$7)",[id,caseId,sender.type,sender.accountId??null,sender.label??null,body.message,internal]);for(const attachment of Array.isArray(body.attachments)?body.attachments:[])await context.database.query("insert into support_case_attachments(id,case_id,message_id,asset_id,file_url,file_name,mime_type,size_bytes)values($1,$2,$3,$4,$5,$6,$7,$8)",[randomUUID(),caseId,id,attachment.asset_id??null,attachment.file_url,attachment.file_name??null,attachment.mime_type??null,attachment.size_bytes??null]);await context.database.query("update support_cases set last_message_at=now(),updated_at=now() where id=$1",[caseId]);return caseDetail(context,caseId,includeInternal);}
+async function addMessage(context:AppContext,caseId:string,body:Record<string,any>,sender:{type:string;accountId?:string;label?:string},internal=false,includeInternal=false):Promise<any>{validateSupportMessage(body);const id=randomUUID();await context.database.query("insert into support_case_messages(id,case_id,sender_type,sender_account_id,sender_label,message,is_internal)values($1,$2,$3,$4,$5,$6,$7)",[id,caseId,sender.type,sender.accountId??null,sender.label??null,body.message,internal]);for(const attachment of Array.isArray(body.attachments)?body.attachments:[])await context.database.query("insert into support_case_attachments(id,case_id,message_id,asset_id,file_url,file_name,mime_type,size_bytes)values($1,$2,$3,$4,$5,$6,$7,$8)",[randomUUID(),caseId,id,attachment.asset_id??null,attachment.file_url,attachment.file_name??null,attachment.mime_type??null,attachment.size_bytes??null]);await context.database.query("update support_cases set last_message_at=now(),updated_at=now() where id=$1",[caseId]);return caseDetail(context,caseId,includeInternal);}
 
 async function deliverNotification(context:AppContext,id:string):Promise<any>{const delivery=(await context.database.query("select * from notification_deliveries where id=$1",[id])).rows[0];if(!delivery)throw new HttpError(404,"Notificación no encontrada");if(config.NOTIFICATION_DEV_MODE){return(await context.database.query("update notification_deliveries set status='delivered',attempts=attempts+1,provider_message_id=$2,delivered_at=now(),updated_at=now()where id=$1 returning *",[id,`dev-${randomUUID()}`])).rows[0];}if(!config.sendgridApiKey)throw new HttpError(503,"SENDGRID_API_KEY no configurado");const payload=delivery.payload??{};const response=await fetchExternal("https://api.sendgrid.com/v3/mail/send",{method:"POST",headers:{authorization:`Bearer ${config.sendgridApiKey}`,"content-type":"application/json"},body:JSON.stringify({personalizations:[{to:[{email:delivery.recipient}],subject:payload.subject??"Notificación SAUT"}],from:{email:config.sendgridFromEmail},content:[{type:"text/plain",value:payload.message??payload.summary??"Notificación"}]})},undefined,"sendgrid");if(!response.ok){const message=(await response.text()).slice(0,1000);await context.database.query("update notification_deliveries set status='failed',attempts=attempts+1,last_error=$2,updated_at=now()where id=$1",[id,message]);throw new HttpError(503,"SendGrid rechazó la notificación");}return(await context.database.query("update notification_deliveries set status='delivered',attempts=attempts+1,provider_message_id=$2,delivered_at=now(),updated_at=now()where id=$1 returning *",[id,`sg-${randomUUID()}`])).rows[0];}
 
@@ -83,6 +101,8 @@ async function kpis(context:AppContext,query:Record<string,any>):Promise<any>{co
 
 async function createSupportCase(context: AppContext, request: FastifyRequest, reply: any): Promise<any> {
   const body = asObject(request.body);
+  validateSupportMessage(body);
+  validateSupportSubject(body);
   const actor = await optionalActor(request);
   const email = actor
     ? await accountEmail(context, actor.accountId)

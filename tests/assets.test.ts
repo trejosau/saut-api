@@ -83,6 +83,7 @@ describe("asset upload policy", () => {
 
     expect(context.s3.send).toHaveBeenCalledOnce();
     expect(context.s3.send.mock.calls[0]![0].input.ContentType).toBe("image/png");
+    expect(context.s3.send.mock.calls[0]![1]?.abortSignal).toBeInstanceOf(AbortSignal);
     expect(query.mock.calls[0]![0]).toContain("upload_status='uploading'");
     expect(query.mock.calls[1]![0]).toContain("upload_status='ready'");
   });
