@@ -3,7 +3,6 @@
 import { WebSocket } from "ws";
 import { createHmac } from "node:crypto";
 import { clearTimeout, setTimeout } from "node:timers";
-import { createHmac } from "node:crypto";
 import { Buffer } from "node:buffer";
 
 const base = process.env.API_BASE_URL ?? "http://localhost:8080";
