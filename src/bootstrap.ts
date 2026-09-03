@@ -57,7 +57,7 @@ async function ensureTargetDatabase(admin: pg.Client): Promise<void> {
   }
 }
 
-async function applySqlDirectory(client: pg.Client, directory: string): Promise<void> {
+async function applySeedDirectory(client: pg.Client, directory: string): Promise<void> {
   const files = (await readdir(directory)).filter((name) => name.endsWith(".sql")).sort();
   for (const file of files) {
     const sql = await readFile(resolve(directory, file), "utf8");
@@ -203,10 +203,7 @@ async function main(): Promise<void> {
     const target = new Client({ connectionString: databaseUrl(TARGET_DATABASE) });
     try {
       await target.connect();
-      const root = process.cwd();
-      const migrations = resolve(root, "migrations");
-      const seeds = resolve(root, "seeds");
-      await applySqlDirectory(target, migrations);
+      const seeds = resolve(process.cwd(), "seeds");
 
       if (config.MIGRATION_IMPORT_LEGACY_DATABASES) {
         const prior = await target.query<{ status: string }>(
@@ -243,7 +240,7 @@ async function main(): Promise<void> {
         }
       }
 
-      await applySqlDirectory(target, seeds);
+      await applySeedDirectory(target, seeds);
       console.log(`Bootstrap completed for ${TARGET_DATABASE}`);
     } finally {
       await target.end().catch(() => undefined);

@@ -17,7 +17,7 @@ const domainTables = [
 
 describe("consolidated schema", () => {
   it("contains all 49 migrated tables plus persistent assets", async () => {
-    const sql = await readFile(resolve(process.cwd(), "migrations/0001_consolidated_schema.sql"), "utf8");
+    const sql = await readFile(resolve(process.cwd(), "prisma/migrations/20260701000000_baseline/migration.sql"), "utf8");
     expect(domainTables).toHaveLength(50);
     for (const table of domainTables) expect(sql).toContain(`CREATE TABLE IF NOT EXISTS ${table}`);
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS migration_runs");

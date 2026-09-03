@@ -15,9 +15,10 @@ npm run dev
 ```
 
 `npm run dev` aplica migraciones Prisma pendientes, ejecuta el bootstrap
-idempotente de seeds e inicia el watcher. La importación de bases heredadas es
-explícita mediante `MIGRATION_IMPORT_LEGACY_DATABASES=true`; su eliminación
-está desactivada por defecto.
+idempotente de seeds e inicia el watcher. El esquema de la base de datos tiene
+una única fuente de migraciones: `prisma/migrations`. La importación de bases
+heredadas es explícita mediante `MIGRATION_IMPORT_LEGACY_DATABASES=true`; su
+eliminación está desactivada por defecto.
 
 ## Prisma
 
@@ -37,7 +38,8 @@ npx prisma migrate resolve --applied 20260701000000_baseline
 La migración SQL baseline conserva checks e índices por expresión que Prisma
 Client no representa. `PrismaDataSource` centraliza consultas y lifecycle; las
 transacciones heredadas permanecen encapsuladas mientras se migran
-gradualmente a `$transaction`.
+gradualmente a `$transaction`. El comando `npm run bootstrap` asume que
+`prisma migrate deploy` ya se ejecutó.
 
 ## Calidad
 
