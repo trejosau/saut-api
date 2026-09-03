@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { randomUUID } from "node:crypto";
+import { PassThrough } from "node:stream";
 
 import { CreateBucketCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import cors from "@fastify/cors";
@@ -438,6 +439,19 @@ export async function buildFastifyServer(context: AppContext): Promise<FastifyIn
     });
     await app.register(websocket);
     app.addContentTypeParser(["application/octet-stream", "application/pdf", "image/png", "image/jpeg", "image/webp"], { parseAs: "buffer" }, (_request, body, done) => done(null, body));
+    app.addHook("preParsing", (request, _reply, payload, done) => {
+      if (!String(request.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+        done(null, payload);
+        return;
+      }
+      const rawBody = new PassThrough();
+      const chunks: Buffer[] = [];
+      payload.on("data", (chunk: Buffer | string) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      payload.once("end", () => { request.rawBody = Buffer.concat(chunks).toString("utf8"); });
+      payload.once("error", (error) => rawBody.destroy(error));
+      payload.pipe(rawBody);
+      done(null, rawBody);
+    });
     app.addHook("onRequest", globalRateLimit);
     app.addHook("preHandler", async (request) => {
       const path = request.url.split("?", 1)[0] ?? request.url;

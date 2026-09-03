@@ -57,6 +57,7 @@ GET /inventory/stock
 GET /inventory/items/{id}/movements
 GET /pricing/sku
 POST /webhooks/shipping/skydropx
+POST /webhooks/payments/stripe
 GET /support/chat/reasons
 GET /support/cases
 POST /support/cases
@@ -166,7 +167,7 @@ describe("legacy gateway contract", () => {
   });
 
   it("keeps every method and route", () => {
-    expect(contract).toHaveLength(139);
+    expect(contract).toHaveLength(140);
     for (const route of contract) {
       expect(app.hasRoute(route as any), `${route.method} ${route.url}`).toBe(true);
     }

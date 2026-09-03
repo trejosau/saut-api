@@ -8,6 +8,7 @@ import {
   CatalogModule,
   CommerceModule,
   OperationsModule,
+  WebhooksModule,
   SupportAnalyticsModule
 } from "./nest/domain-modules.js";
 import { PlatformModule } from "./nest/platform.module.js";
@@ -23,6 +24,7 @@ export class AppModule {
         CatalogModule,
         CommerceModule,
         OperationsModule,
+        WebhooksModule,
         AssetsModule,
         SupportAnalyticsModule
       ]

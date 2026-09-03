@@ -57,6 +57,7 @@ const schema = z.object({
   STRIPE_MODE: z.enum(["mock", "live"]).default("mock"),
   STRIPE_SECRET_KEY: z.string().default("sk_test_mock"),
   STRIPE_WEBHOOK_SECRET: z.string().default("whsec_mock"),
+  STRIPE_WEBHOOK_TOLERANCE_SEC: z.coerce.number().int().positive().default(300),
   SKYDROPX_MODE: z.enum(["mock", "live"]).default("mock"),
   SKYDROPX_BASE_URL: z.url().default("https://pro.skydropx.com"),
   SKYDROPX_CLIENT_ID: z.string().default(""),
@@ -65,6 +66,7 @@ const schema = z.object({
   SKYDROPX_SCOPE: z.string().default(""),
   SKYDROPX_REQUESTED_CARRIERS: z.string().default(""),
   SKYDROPX_WEBHOOK_SECRET: z.string().default("skydropx_wh_mock"),
+  SKYDROPX_WEBHOOK_AUTH_HEADER: z.string().trim().min(3).max(25).regex(/^\S+$/).default("authorization"),
   SHIP_FROM_COUNTRY_CODE: z.string().default("MX"),
   SHIP_FROM_POSTAL_CODE: z.string().default("27000"),
   SHIP_FROM_AREA_LEVEL1: z.string().default("Coahuila"),
@@ -99,7 +101,10 @@ const schema = z.object({
     ["AUTH_INTERNAL_API_KEY", "dev-internal-auth-key"],
     ["S3_SECRET_KEY", "saut_minio_password"],
     ["ASSETS_SIGNING_SECRET", "dev-assets-signing-secret"],
-    ["ASSETS_INTERNAL_API_KEY", "dev-assets-internal-key"]
+    ["ASSETS_INTERNAL_API_KEY", "dev-assets-internal-key"],
+    ["STRIPE_SECRET_KEY", "sk_test_mock"],
+    ["STRIPE_WEBHOOK_SECRET", "whsec_mock"],
+    ["SKYDROPX_WEBHOOK_SECRET", "skydropx_wh_mock"]
   ];
 
   for (const [path, developmentValue] of unsafeSecrets) {

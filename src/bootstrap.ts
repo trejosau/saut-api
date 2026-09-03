@@ -29,7 +29,7 @@ const TABLE_ORDER = [
   "auth_events", "mfa_policy", "account_mfa", "recovery_codes", "audit_log", "role_permissions", "account_roles", "account_permission_overrides",
   "designs", "design_variants", "informative_images", "publications", "publication_mockups",
   "collections_sets", "collection_set_items", "drops", "drop_items", "season_config",
-  "carts", "cart_items", "checkout_sessions", "payment_attempts", "payment_transactions", "refunds",
+  "carts", "cart_items", "checkout_sessions", "payment_attempts", "payment_transactions", "refunds", "webhook_events",
   "orders", "order_items", "order_state_history", "drop_counters", "work_orders", "work_order_failures",
   "inventory_items", "inventory_movements", "stock_entries", "shipments", "shipment_events",
   "local_address_changes", "local_delivery_evidences", "support_cases", "support_case_messages",

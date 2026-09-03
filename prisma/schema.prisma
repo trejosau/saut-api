@@ -524,6 +524,25 @@ model payment_attempts {
   payment_transactions       payment_transactions[]
 }
 
+model webhook_events {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  provider        String
+  event_id        String
+  event_id_source String
+  event_type      String
+  payload         Json
+  payload_sha256  String
+  status          String    @default("processing")
+  attempts        Int       @default(1)
+  last_error      String?
+  received_at     DateTime  @default(now()) @db.Timestamptz(6)
+  processed_at    DateTime? @db.Timestamptz(6)
+  updated_at      DateTime  @default(now()) @db.Timestamptz(6)
+
+  @@unique([provider, event_id])
+  @@index([status, updated_at])
+}
+
 model payment_transactions {
   id                  String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   payment_attempt_id  String           @db.Uuid
