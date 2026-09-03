@@ -30,6 +30,17 @@ describe("PrismaDataSource", () => {
       .resolves.toEqual({ rows: [], rowCount: 1 });
   });
 
+  it("exposes PostgreSQL pool gauges without opening a connection", () => {
+    Object.assign(pool, { totalCount: 4, idleCount: 2, waitingCount: 1 });
+
+    expect(dataSource.poolMetrics()).toEqual({
+      totalConnections: 4,
+      idleConnections: 2,
+      waitingRequests: 1,
+      maxConnections: 10,
+    });
+  });
+
   it("propagates Prisma errors to the application boundary", async () => {
     const error = new Error("database unavailable");
     vi.mocked(prisma.$queryRawUnsafe).mockRejectedValue(error);

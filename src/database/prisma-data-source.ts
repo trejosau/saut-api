@@ -11,6 +11,13 @@ export type QueryResult<Row = any> = {
   rowCount: number | null;
 };
 
+export type DatabasePoolMetrics = {
+  totalConnections: number;
+  idleConnections: number;
+  waitingRequests: number;
+  maxConnections: number;
+};
+
 export type Queryable = {
   query<Row = any>(
     sql: string,
@@ -25,12 +32,14 @@ type PrismaDataSourceDependencies = {
 
 export class PrismaDataSource implements Queryable {
   private readonly pool: pg.Pool;
+  private readonly maxConnections: number;
   readonly client: PrismaClient;
 
   constructor(connectionString = config.DATABASE_URL, dependencies: PrismaDataSourceDependencies = {}) {
+    this.maxConnections = config.NODE_ENV === "production" ? 20 : 10;
     this.pool = dependencies.pool ?? new Pool({
       connectionString,
-      max: config.NODE_ENV === "production" ? 20 : 10,
+      max: this.maxConnections,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 10_000
     });
@@ -58,6 +67,15 @@ export class PrismaDataSource implements Queryable {
    */
   connect(): Promise<pg.PoolClient> {
     return this.pool.connect();
+  }
+
+  poolMetrics(): DatabasePoolMetrics {
+    return {
+      totalConnections: this.pool.totalCount,
+      idleConnections: this.pool.idleCount,
+      waitingRequests: this.pool.waitingCount,
+      maxConnections: this.maxConnections,
+    };
   }
 
   async ping(): Promise<void> {

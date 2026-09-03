@@ -16,5 +16,8 @@ export function createPoolMock() {
   return {
     connect: vi.fn(),
     end: vi.fn(),
+    totalCount: 0,
+    idleCount: 0,
+    waitingCount: 0,
   } as unknown as pg.Pool;
 }

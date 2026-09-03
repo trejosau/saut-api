@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 import { config } from "../config.js";
 import { closeAppContext, normalizeApiError, readiness } from "../platform.js";
+import { runtimeMetrics } from "../observability.js";
 import type { AppContext } from "../types.js";
 import { APP_CONTEXT, APP_OWNS_CONTEXT, FASTIFY_SERVER } from "./tokens.js";
 
@@ -16,9 +17,20 @@ class HealthController {
     return "ok";
   }
 
+  @Get("live")
+  live(): { status: string; service: string; version: string } {
+    return { status: "ok", service: "saut-api", version: "1.0.0" };
+  }
+
   @Get("ready")
   ready(): Promise<{ status: string; service: string; version: string }> {
     return readiness(this.context);
+  }
+
+  @Get("metrics")
+  @Header("cache-control", "no-store")
+  metrics() {
+    return runtimeMetrics.snapshot(this.context.database.poolMetrics());
   }
 }
 
