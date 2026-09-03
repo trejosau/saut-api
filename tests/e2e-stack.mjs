@@ -200,11 +200,28 @@ const addressChange = await request("PATCH", `/shipping/local/orders/${confirmed
 if (addressChange.address?.line1 !== "Av. Juárez 101") throw new Error("Authorized local address change failed");
 
 if (process.env.ASSETS_INTERNAL_API_KEY) {
+  const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   const asset = await request("POST", "/assets/sign-upload", {
     content_type: "image/png",
     category: "support",
-    visibility: "internal"
+    visibility: "internal",
+    size_bytes: png.byteLength,
   }, { "x-internal-api-key": process.env.ASSETS_INTERNAL_API_KEY });
+  const upload = async () => fetch(asset.upload_url, {
+    method: "PUT",
+    headers: { "content-type": "image/png" },
+    body: png,
+  });
+  const uploads = await Promise.all([upload(), upload()]);
+  const uploadStatuses = uploads.map((response) => response.status).sort((left, right) => left - right);
+  if (uploadStatuses.join(",") !== "204,409") {
+    throw new Error(`Concurrent asset upload contract failed: ${uploadStatuses.join(",")}`);
+  }
+  const read = await request("POST", `/assets/${asset.asset_id}/sign-read`, {}, { "x-internal-api-key": process.env.ASSETS_INTERNAL_API_KEY });
+  const downloaded = await fetch(read.url);
+  if (!downloaded.ok || (await downloaded.arrayBuffer()).byteLength !== png.byteLength) {
+    throw new Error("Uploaded asset could not be downloaded with a signed read URL");
+  }
   await expectStatus("GET", `/assets/${asset.asset_id}/resolve`, 404);
 }
 

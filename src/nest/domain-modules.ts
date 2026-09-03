@@ -1,7 +1,8 @@
 import { Inject, Injectable, Logger, Module, type OnApplicationBootstrap, type OnApplicationShutdown, type OnModuleInit } from "@nestjs/common";
 import type { FastifyInstance } from "fastify";
 
-import { registerAssets } from "../modules/assets.js";
+import { config } from "../config.js";
+import { cleanupOrphanedAssets, registerAssets } from "../modules/assets.js";
 import { registerAuth } from "../modules/auth.js";
 import { registerAdvancedAuth } from "../modules/advanced-auth.js";
 import { registerCatalog } from "../modules/catalog.js";
@@ -134,6 +135,39 @@ class WebhooksRouteRegistrar extends RouteRegistrar implements OnModuleInit {
 @Module({ providers: [WebhooksRouteRegistrar] })
 export class WebhooksModule {}
 
+class AssetCleanupWorker implements OnApplicationBootstrap, OnApplicationShutdown {
+  private readonly logger = new Logger(AssetCleanupWorker.name);
+  private timer?: NodeJS.Timeout;
+  private running?: Promise<void>;
+
+  constructor(@Inject(APP_CONTEXT) private readonly context: AppContext) {}
+
+  private runCleanup(): void {
+    if (this.running) return;
+    this.running = cleanupOrphanedAssets(this.context)
+      .then((result) => {
+        if (result.deletedAssets || result.deletedObjects) this.logger.log(result);
+      })
+      .catch((error: unknown) => this.logger.error(error))
+      .finally(() => { this.running = undefined; });
+  }
+
+  onApplicationBootstrap(): void {
+    if (this.timer) return;
+    this.runCleanup();
+    this.timer = setInterval(() => this.runCleanup(), config.ASSET_CLEANUP_INTERVAL_SEC * 1000);
+    this.timer.unref();
+  }
+
+  async onApplicationShutdown(): Promise<void> {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+    await this.running;
+  }
+}
+
 @Injectable()
 class AssetsRouteRegistrar extends RouteRegistrar implements OnModuleInit {
   constructor(
@@ -148,7 +182,7 @@ class AssetsRouteRegistrar extends RouteRegistrar implements OnModuleInit {
   }
 }
 
-@Module({ providers: [AssetsRouteRegistrar] })
+@Module({ providers: [AssetsRouteRegistrar, AssetCleanupWorker] })
 export class AssetsModule {}
 
 @Injectable()
