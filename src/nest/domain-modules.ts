@@ -5,7 +5,7 @@ import { config } from "../config.js";
 import { cleanupOrphanedAssets, registerAssets } from "../modules/assets.js";
 import { registerAuth } from "../modules/auth.js";
 import { registerAdvancedAuth } from "../modules/advanced-auth.js";
-import { registerPasskeys } from "../modules/passkeys.js";
+import { cleanupWebAuthnChallenges, registerPasskeys } from "../modules/passkeys.js";
 import { registerCatalog } from "../modules/catalog.js";
 import { expirePaymentReservations, recoverOversellRefunds, registerCommerce } from "../modules/commerce.js";
 import { registerOperations } from "../modules/operations.js";
@@ -39,7 +39,41 @@ class AuthRouteRegistrar extends RouteRegistrar implements OnModuleInit {
   }
 }
 
-@Module({ providers: [AuthRouteRegistrar] })
+@Injectable()
+class WebAuthnChallengeCleanupWorker implements OnApplicationBootstrap, OnApplicationShutdown {
+  private readonly logger = new Logger(WebAuthnChallengeCleanupWorker.name);
+  private timer?: NodeJS.Timeout;
+  private running?: Promise<void>;
+
+  constructor(@Inject(APP_CONTEXT) private readonly context: AppContext) {}
+
+  private runCleanup(): void {
+    if (this.running) return;
+    this.running = cleanupWebAuthnChallenges(this.context)
+      .then((deleted) => {
+        if (deleted) this.logger.log(`Purged ${deleted} stale WebAuthn challenges`);
+      })
+      .catch((error: unknown) => this.logger.error(error))
+      .finally(() => { this.running = undefined; });
+  }
+
+  onApplicationBootstrap(): void {
+    if (this.timer) return;
+    this.runCleanup();
+    this.timer = setInterval(() => this.runCleanup(), 60_000);
+    this.timer.unref();
+  }
+
+  async onApplicationShutdown(): Promise<void> {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+    await this.running;
+  }
+}
+
+@Module({ providers: [AuthRouteRegistrar, WebAuthnChallengeCleanupWorker] })
 export class AuthModule {}
 
 @Injectable()

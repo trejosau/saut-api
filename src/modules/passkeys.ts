@@ -172,6 +172,21 @@ export async function consumeChallenge(client: { query<Row = any>(sql: string, v
   if (!consumed.rows[0]) throw new HttpError(401, "Challenge WebAuthn inválido o expirado", undefined, "PASSKEY_CHALLENGE_INVALID");
 }
 
+export async function cleanupWebAuthnChallenges(context: AppContext, batchSize = 500): Promise<number> {
+  const result = await context.database.query<{ id: string }>(
+    `delete from webauthn_challenges
+     where id in (
+       select id from webauthn_challenges
+       where consumed_at is not null or expires_at <= now()
+       order by expires_at
+       limit $1
+     )
+     returning id`,
+    [batchSize],
+  );
+  return result.rowCount ?? result.rows.length;
+}
+
 function uniqueViolation(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "23505");
 }

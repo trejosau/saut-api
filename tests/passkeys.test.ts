@@ -35,7 +35,7 @@ vi.mock("@simplewebauthn/server", () => ({
   verifyRegistrationResponse: mocks.verifyRegistrationResponse,
 }));
 
-import { registerPasskeys, consumeChallenge } from "../src/modules/passkeys.js";
+import { cleanupWebAuthnChallenges, registerPasskeys, consumeChallenge } from "../src/modules/passkeys.js";
 
 const accountId = "11111111-1111-4111-8111-111111111111";
 const credentialRecordId = "22222222-2222-4222-8222-222222222222";
@@ -288,5 +288,14 @@ describe("challenge replay protection", () => {
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
     expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
     expect(client.query).toHaveBeenCalledWith(expect.stringContaining("consumed_at is null and expires_at > now()"), [challengeId, "authentication"]);
+  });
+
+  it("purges stale challenges in bounded batches while preserving active rows", async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [{ id: challengeId }], rowCount: 1 });
+    const deleted = await cleanupWebAuthnChallenges(context({ query }), 250);
+
+    expect(deleted).toBe(1);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("consumed_at is not null or expires_at <= now()"), [250]);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("limit $1"), [250]);
   });
 });
