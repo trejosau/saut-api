@@ -5,6 +5,7 @@ import { config } from "../config.js";
 import { cleanupOrphanedAssets, registerAssets } from "../modules/assets.js";
 import { registerAuth } from "../modules/auth.js";
 import { registerAdvancedAuth } from "../modules/advanced-auth.js";
+import { registerPasskeys } from "../modules/passkeys.js";
 import { registerCatalog } from "../modules/catalog.js";
 import { expirePaymentReservations, recoverOversellRefunds, registerCommerce } from "../modules/commerce.js";
 import { registerOperations } from "../modules/operations.js";
@@ -32,7 +33,9 @@ class AuthRouteRegistrar extends RouteRegistrar implements OnModuleInit {
   }
 
   onModuleInit(): Promise<void> {
-    return registerAuth(this.server, this.context).then(() => registerAdvancedAuth(this.server, this.context));
+    return registerAuth(this.server, this.context)
+      .then(() => registerAdvancedAuth(this.server, this.context))
+      .then(() => registerPasskeys(this.server, this.context));
   }
 }
 

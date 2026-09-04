@@ -41,6 +41,10 @@ const schema = z.object({
   AUTH_GOOGLE_DISCOVERY_URL: z.url().default("https://accounts.google.com/.well-known/openid-configuration"),
   AUTH_GOOGLE_REDIRECT_URI: z.url().default("http://localhost:8080/api/auth/google/callback"),
   AUTH_GOOGLE_FRONTEND_BASE_URL: z.url().default("http://localhost:4200"),
+  WEBAUTHN_RP_NAME: z.string().trim().min(1).max(64).default("SAUT"),
+  WEBAUTHN_RP_ID: z.string().trim().min(1).max(255).regex(/^(?:localhost|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)$/i).default("localhost"),
+  WEBAUTHN_EXPECTED_ORIGIN: z.url().default("http://localhost:4200"),
+  WEBAUTHN_CHALLENGE_TTL_SEC: z.coerce.number().int().min(60).max(900).default(300),
   RATE_LIMIT_GLOBAL_MAX: z.coerce.number().int().positive().default(120),
   RATE_LIMIT_GLOBAL_WINDOW_SEC: z.coerce.number().int().positive().default(1),
   RATE_LIMIT_FAIL_OPEN: booleanValue.default(true),
@@ -163,6 +167,23 @@ const schema = z.object({
   }
   if (values.SKYDROPX_MODE === "mock") {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["SKYDROPX_MODE"], message: "must be live in production" });
+  }
+  if (values.WEBAUTHN_RP_ID === "localhost") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["WEBAUTHN_RP_ID"], message: "must be configured for the production domain" });
+  }
+  try {
+    const origin = new URL(values.WEBAUTHN_EXPECTED_ORIGIN);
+    if (origin.protocol !== "http:" && origin.protocol !== "https:") {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["WEBAUTHN_EXPECTED_ORIGIN"], message: "must use http or https" });
+    }
+    if (origin.username || origin.password || origin.pathname !== "/" || origin.search || origin.hash) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["WEBAUTHN_EXPECTED_ORIGIN"], message: "must be an origin without path, query or credentials" });
+    }
+    if (origin.protocol !== "https:") {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["WEBAUTHN_EXPECTED_ORIGIN"], message: "must use HTTPS in production" });
+    }
+  } catch {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["WEBAUTHN_EXPECTED_ORIGIN"], message: "must be a valid origin" });
   }
   if (values.CORS_ALLOWED_ORIGINS.split(",").some((origin) => origin.trim() === "*")) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["CORS_ALLOWED_ORIGINS"], message: "must not use wildcard origins in production" });

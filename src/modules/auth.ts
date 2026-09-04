@@ -90,7 +90,7 @@ async function waitForRefreshRotationCache(context: AppContext, key: string): Pr
   return null;
 }
 
-async function issueSession(
+export async function issueSession(
   context: AppContext,
   account: { id: string; actor_type: string; primary_email: string | null },
   request: FastifyRequest,

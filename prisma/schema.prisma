@@ -66,6 +66,8 @@ model accounts {
   sessions                     sessions[]
   account_mfa                  account_mfa?
   recovery_codes               recovery_codes[]
+  webauthn_credentials         webauthn_credentials[]
+  webauthn_challenges          webauthn_challenges[]
 }
 
 model account_mfa {
@@ -100,6 +102,38 @@ model recovery_codes {
   accounts   accounts  @relation(fields: [account_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([account_id, used_at])
+}
+
+model webauthn_credentials {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  account_id    String    @db.Uuid
+  credential_id String    @unique
+  public_key    Bytes
+  counter       BigInt    @default(0)
+  transports    String[]  @default([])
+  device_type   String?
+  backed_up     Boolean   @default(false)
+  name          String?
+  created_at    DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime  @default(now()) @db.Timestamptz(6)
+  last_used_at  DateTime? @db.Timestamptz(6)
+  accounts      accounts  @relation(fields: [account_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([account_id, created_at(sort: Desc)], map: "webauthn_credentials_account_idx")
+}
+
+model webauthn_challenges {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  challenge   String    @unique
+  type        String
+  account_id  String?   @db.Uuid
+  expires_at  DateTime  @db.Timestamptz(6)
+  consumed_at DateTime? @db.Timestamptz(6)
+  created_at  DateTime  @default(now()) @db.Timestamptz(6)
+  accounts    accounts? @relation(fields: [account_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([account_id, type, created_at(sort: Desc)], map: "webauthn_challenges_account_idx")
+  @@index([type, expires_at], map: "webauthn_challenges_expiry_idx")
 }
 
 model analytics_events {
@@ -486,32 +520,32 @@ model order_state_history {
 }
 
 model orders {
-  id                  String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  checkout_session_id String                @unique @db.Uuid
-  payment_attempt_id  String                @db.Uuid
-  payment_reference   String
+  id                         String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  checkout_session_id        String                @unique @db.Uuid
+  payment_attempt_id         String                @db.Uuid
+  payment_reference          String
   customer_access_token_hash String?
-  customer_email      String
-  customer_phone      String
-  shipping_method     String
-  shipping_cost_mxn   Int
-  subtotal_mxn        Int
-  total_mxn           Int
-  currency            String                @default("MXN")
-  address             Json
-  status              String                @default("paid")
-  tracking_number     String?
-  tracking_carrier    String?
-  tracking_url        String?
-  shipping_label_url  String?
-  drop_id             String?               @db.Uuid
-  drop_number         Int?
-  drop_total_limit    Int?
-  created_at          DateTime              @default(now()) @db.Timestamptz(6)
-  updated_at          DateTime              @default(now()) @db.Timestamptz(6)
-  order_items         order_items[]
-  order_state_history order_state_history[]
-  work_orders         work_orders[]
+  customer_email             String
+  customer_phone             String
+  shipping_method            String
+  shipping_cost_mxn          Int
+  subtotal_mxn               Int
+  total_mxn                  Int
+  currency                   String                @default("MXN")
+  address                    Json
+  status                     String                @default("paid")
+  tracking_number            String?
+  tracking_carrier           String?
+  tracking_url               String?
+  shipping_label_url         String?
+  drop_id                    String?               @db.Uuid
+  drop_number                Int?
+  drop_total_limit           Int?
+  created_at                 DateTime              @default(now()) @db.Timestamptz(6)
+  updated_at                 DateTime              @default(now()) @db.Timestamptz(6)
+  order_items                order_items[]
+  order_state_history        order_state_history[]
+  work_orders                work_orders[]
 }
 
 model payment_attempts {
@@ -695,21 +729,21 @@ model season_config {
 }
 
 model sessions {
-  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  account_id         String    @db.Uuid
-  refresh_token_hash String    @unique
+  id                          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  account_id                  String    @db.Uuid
+  refresh_token_hash          String    @unique
   previous_refresh_token_hash String?
-  created_at         DateTime  @default(now()) @db.Timestamptz(6)
-  expires_at         DateTime  @db.Timestamptz(6)
-  revoked_at         DateTime? @db.Timestamptz(6)
-  revoke_reason      String?
-  ip                 String?
-  user_agent         String?
-  last_seen_at       DateTime? @db.Timestamptz(6)
-  mfa_verified_at    DateTime? @db.Timestamptz(6)
-  step_up_verified_at DateTime? @db.Timestamptz(6)
-  step_up_method     String?
-  accounts           accounts  @relation(fields: [account_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  created_at                  DateTime  @default(now()) @db.Timestamptz(6)
+  expires_at                  DateTime  @db.Timestamptz(6)
+  revoked_at                  DateTime? @db.Timestamptz(6)
+  revoke_reason               String?
+  ip                          String?
+  user_agent                  String?
+  last_seen_at                DateTime? @db.Timestamptz(6)
+  mfa_verified_at             DateTime? @db.Timestamptz(6)
+  step_up_verified_at         DateTime? @db.Timestamptz(6)
+  step_up_method              String?
+  accounts                    accounts  @relation(fields: [account_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([previous_refresh_token_hash], map: "sessions_previous_refresh_token_hash_idx")
 }

@@ -60,6 +60,18 @@ describe("TOTP and recovery-code primitives", () => {
     expect(() => requireStepUp(actor, 60)).toThrowError(expect.objectContaining({ statusCode: 403 }));
     expect(() => requireStepUp(actor, 180)).not.toThrow();
   });
+
+  it("accepts a serialized step-up timestamp from a database adapter", () => {
+    const actor = {
+      accountId,
+      actorType: "admin",
+      sessionId,
+      roles: ["admin"],
+      permissions: [],
+      stepUpVerifiedAt: new Date().toISOString() as unknown as Date,
+    };
+    expect(() => requireStepUp(actor, 60)).not.toThrow();
+  });
 });
 
 describe("advanced auth integration routes", () => {

@@ -130,8 +130,14 @@ export function requiresMfa(policy: MfaPolicy, roles: string[]): boolean {
   return policy.mode === "required_roles" && roles.some((role) => policy.required_roles.includes(role));
 }
 
+function timestampValue(value: Date | string | null | undefined): number {
+  if (value === null || value === undefined) return Number.NaN;
+  const date = value instanceof Date ? value : new Date(value);
+  return date.getTime();
+}
+
 export function requireStepUp(actor: Actor, maxAgeSec = config.AUTH_MFA_STEP_UP_TTL_SEC): void {
-  const verifiedAt = actor.stepUpVerifiedAt instanceof Date ? actor.stepUpVerifiedAt.getTime() : Number.NaN;
+  const verifiedAt = timestampValue(actor.stepUpVerifiedAt);
   if (!Number.isFinite(verifiedAt) || verifiedAt <= Date.now() - maxAgeSec * 1000) {
     throw new HttpError(403, "Se requiere step-up authentication", undefined, "STEP_UP_REQUIRED");
   }
@@ -195,7 +201,7 @@ export async function readMfaStatus(context: AppContext, actor: Actor) {
     setup_pending: Boolean(record?.pending_secret_encrypted),
     required: requiresMfa(policy, actor.roles),
     verified: Boolean(actor.mfaVerifiedAt),
-    step_up_verified: actor.stepUpVerifiedAt instanceof Date && actor.stepUpVerifiedAt.getTime() > Date.now() - policy.step_up_ttl_sec * 1000,
+    step_up_verified: timestampValue(actor.stepUpVerifiedAt) > Date.now() - policy.step_up_ttl_sec * 1000,
     recovery_codes_remaining: remaining,
     methods: enabled ? ["totp", "recovery_code"] : [],
     policy: { mode: policy.mode, required_roles: policy.required_roles, step_up_ttl_sec: policy.step_up_ttl_sec },

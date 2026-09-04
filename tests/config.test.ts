@@ -22,6 +22,8 @@ const productionEnvironment = {
   RATE_LIMIT_FAIL_OPEN: "false",
   STRIPE_MODE: "live",
   SKYDROPX_MODE: "live",
+  WEBAUTHN_RP_ID: "saut.example.com",
+  WEBAUTHN_EXPECTED_ORIGIN: "https://saut.example.com",
 } satisfies NodeJS.ProcessEnv;
 
 describe("parseConfig", () => {
@@ -44,6 +46,11 @@ describe("parseConfig", () => {
   it("rejects mock provider credentials in production", () => {
     expect(() => parseConfig({ ...productionEnvironment, STRIPE_SECRET_KEY: "sk_test_mock" })).toThrowError();
     expect(() => parseConfig({ ...productionEnvironment, SKYDROPX_WEBHOOK_SECRET: "skydropx_wh_mock" })).toThrowError();
+  });
+
+  it("requires a production WebAuthn relying-party domain and HTTPS origin", () => {
+    expect(() => parseConfig({ ...productionEnvironment, WEBAUTHN_RP_ID: "localhost" })).toThrowError();
+    expect(() => parseConfig({ ...productionEnvironment, WEBAUTHN_EXPECTED_ORIGIN: "http://saut.example.com" })).toThrowError();
   });
 
   it("rejects empty and example placeholder auth secrets in production", () => {

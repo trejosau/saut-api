@@ -246,10 +246,11 @@ export async function verifyAccessToken(token: string): Promise<Actor> {
       throw new HttpError(401, "Sesión revocada o expirada");
     }
     const security = await database.query<{
-      mfa_verified_at: Date | null; step_up_verified_at: Date | null; step_up_method: string | null;
+      mfa_verified_at: Date | null; step_up_verified_at: Date | null; step_up_verified_epoch: number | string | bigint | null; step_up_method: string | null;
       mfa_enabled: boolean; mfa_mode: string; required_roles: string[];
     }>(
-      `select s.mfa_verified_at, s.step_up_verified_at, s.step_up_method,
+      `select s.mfa_verified_at, s.step_up_verified_at,
+        extract(epoch from s.step_up_verified_at) as step_up_verified_epoch, s.step_up_method,
         coalesce(am.enabled, false) as mfa_enabled, coalesce(mp.mode, 'optional') as mfa_mode,
         coalesce(mp.required_roles, '{}') as required_roles
        from sessions s
@@ -260,6 +261,14 @@ export async function verifyAccessToken(token: string): Promise<Actor> {
     );
     const access = await accountAccess(payload.sub);
     const sessionState = security.rows[0];
+    const dateValue = (value: Date | string | null | undefined): Date | null => {
+      if (value === null || value === undefined) return null;
+      const date = value instanceof Date ? value : new Date(value);
+      return Number.isNaN(date.getTime()) ? null : date;
+    };
+    const stepUpDate = sessionState?.step_up_verified_epoch === null || sessionState?.step_up_verified_epoch === undefined
+      ? dateValue(sessionState?.step_up_verified_at)
+      : new Date(Number(sessionState.step_up_verified_epoch) * 1000);
     const requiredRoles = Array.isArray(sessionState?.required_roles) ? sessionState.required_roles : [];
     const mfaRequired = sessionState?.mfa_mode === "required_all"
       || (sessionState?.mfa_mode === "required_roles" && access.roles.some((role) => requiredRoles.includes(role)));
@@ -270,8 +279,8 @@ export async function verifyAccessToken(token: string): Promise<Actor> {
       ...access,
       mfaRequired,
       mfaEnabled: Boolean(sessionState?.mfa_enabled),
-      mfaVerifiedAt: sessionState?.mfa_verified_at ?? null,
-      stepUpVerifiedAt: sessionState?.step_up_verified_at ?? null,
+      mfaVerifiedAt: dateValue(sessionState?.mfa_verified_at),
+      stepUpVerifiedAt: Number.isNaN(stepUpDate?.getTime() ?? Number.NaN) ? null : stepUpDate,
       stepUpMethod: sessionState?.step_up_method ?? null
     };
   } catch (error) {
