@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 
 import { asObject, audit, HttpError, pagination } from "../platform.js";
+import { requireSupportedGarmentType } from "./garment-types.js";
 import { deleteRow, insertRow, patchRow } from "../sql.js";
 import type { AppContext } from "../types.js";
 
@@ -19,6 +20,7 @@ const collectionColumns = ["id", "slug", "title", "description", "visibility", "
 const dropColumns = ["id", "slug", "title", "description", "status", "starts_at", "ends_at", "capacity_total", "visibility", "cover_asset_id", "informative_image_id"] as const;
 const informativeColumns = ["id", "scope_type", "scope_id", "asset_id"] as const;
 const mockupColumns = ["variant_id", "garment_color", "view_side", "mockup_asset_id", "mockup_url"] as const;
+const supportedGarmentTypeSql = "p.garment_type in ('tshirt','hoodie')";
 
 function urlForAsset(id: string | null | undefined): string | null {
   return id ? `/assets/${id}/download` : null;
@@ -47,7 +49,7 @@ const publicationSelect = `
 `;
 
 async function publicationBy(context: AppContext, column: "id" | "slug", value: string, publicOnly = false): Promise<any> {
-  const visibility = publicOnly ? " and p.is_active=true and p.visibility in ('public','visible')" : "";
+  const visibility = ` and ${supportedGarmentTypeSql}${publicOnly ? " and p.is_active=true and p.visibility in ('public','visible')" : ""}`;
   const result = await context.database.query(`${publicationSelect} where p.${column}=$1${visibility}`, [value]);
   if (!result.rows[0]) throw new HttpError(404, "Publicación no encontrada");
   return decoratePublication(result.rows[0]);
@@ -86,6 +88,7 @@ function normalizeVisibility(value: unknown): unknown {
 }
 
 function normalizedInput(input: Record<string, any>): Record<string, any> {
+  if (input.garment_type !== undefined) requireSupportedGarmentType(input.garment_type);
   return { ...input, ...(input.visibility !== undefined ? { visibility: normalizeVisibility(input.visibility) } : {}) };
 }
 
@@ -99,7 +102,8 @@ async function listGeneric(context: AppContext, table: string, query: Record<str
 
 export async function registerCatalog(app: FastifyInstance, context: AppContext): Promise<void> {
   app.get("/catalog/publications", async (request) => {
-    const query = asObject(request.query); const values: any[] = []; const where = ["p.is_active=true", "p.visibility in ('public','visible')"];
+    const query = asObject(request.query); const values: any[] = []; const where = ["p.is_active=true", "p.visibility in ('public','visible')", supportedGarmentTypeSql];
+    if (query.garment_type) requireSupportedGarmentType(query.garment_type);
     for (const key of ["category", "garment_type"]) if (query[key]) { values.push(query[key]); where.push(`p.${key}=$${values.length}`); }
     const sort = query.sort === "az" ? "p.title asc" : query.sort === "za" ? "p.title desc" : query.sort === "price_desc" ? "p.price_mxn desc" : query.sort === "price_asc" ? "p.price_mxn asc" : "p.sort_rank desc,p.created_at desc";
     const { limit, offset } = pagination(query); values.push(limit, offset);
@@ -121,7 +125,7 @@ export async function registerCatalog(app: FastifyInstance, context: AppContext)
   app.get<{ Params: { slug: string } }>("/catalog/collections/:slug", async (request) => {
     const collection = (await context.database.query("select * from collections_sets where slug=$1 and visibility in ('public','visible')", [request.params.slug])).rows[0];
     if (!collection) throw new HttpError(404, "Colección no encontrada");
-    const items = (await context.database.query(`${publicationSelect} join collection_set_items ci on ci.publication_id=p.id where ci.collection_id=$1 and p.is_active=true and p.visibility in ('public','visible') order by ci.position_index`, [collection.id])).rows.map(decoratePublication);
+    const items = (await context.database.query(`${publicationSelect} join collection_set_items ci on ci.publication_id=p.id where ci.collection_id=$1 and p.is_active=true and p.visibility in ('public','visible') and ${supportedGarmentTypeSql} order by ci.position_index`, [collection.id])).rows.map(decoratePublication);
     return { collection: { ...collection, cover_url: urlForAsset(collection.cover_asset_id), informative_image_url: null }, items };
   });
   app.get("/catalog/drops", async (request) => {
@@ -133,7 +137,7 @@ export async function registerCatalog(app: FastifyInstance, context: AppContext)
   });
   app.get<{ Params: { slug: string } }>("/catalog/drops/:slug", async (request) => {
     const drop=(await context.database.query("select * from drops where slug=$1 and visibility in ('public','visible')",[request.params.slug])).rows[0]; if(!drop)throw new HttpError(404,"Drop no encontrado");
-    const items=(await context.database.query(`${publicationSelect} join drop_items di on di.publication_id=p.id where di.drop_id=$1 and p.is_active=true and p.visibility in ('public','visible') order by di.position_index`,[drop.id])).rows.map(decoratePublication);
+    const items=(await context.database.query(`${publicationSelect} join drop_items di on di.publication_id=p.id where di.drop_id=$1 and p.is_active=true and p.visibility in ('public','visible') and ${supportedGarmentTypeSql} order by di.position_index`,[drop.id])).rows.map(decoratePublication);
     return {drop:{...drop,cover_url:urlForAsset(drop.cover_asset_id),informative_image_url:null},items};
   });
   app.get("/catalog/season", async () => (await context.database.query("select is_enabled,updated_at from season_config where id=1")).rows[0] ?? { is_enabled:false });
@@ -143,8 +147,8 @@ export async function registerCatalog(app: FastifyInstance, context: AppContext)
   });
 
   app.get("/admin/catalog/publications", async (request) => {
-    const query=asObject(request.query);const values:any[]=[];const where:string[]=[];
-    if(query.q){values.push(`%${query.q}%`);where.push(`(p.title ilike $${values.length} or p.slug ilike $${values.length})`);} for(const key of ["garment_type","category","is_active"])if(query[key]!==undefined){values.push(query[key]);where.push(`p.${key}=$${values.length}`);} if(query.visibility){values.push(normalizeVisibility(query.visibility));where.push(`p.visibility=$${values.length}`);} const {limit,offset}=pagination(query);values.push(limit,offset);
+    const query=asObject(request.query);const values:any[]=[];const where:string[]=[supportedGarmentTypeSql];
+    if(query.garment_type) requireSupportedGarmentType(query.garment_type); if(query.q){values.push(`%${query.q}%`);where.push(`(p.title ilike $${values.length} or p.slug ilike $${values.length})`);} for(const key of ["garment_type","category","is_active"])if(query[key]!==undefined){values.push(query[key]);where.push(`p.${key}=$${values.length}`);} if(query.visibility){values.push(normalizeVisibility(query.visibility));where.push(`p.visibility=$${values.length}`);} const {limit,offset}=pagination(query);values.push(limit,offset);
     return (await context.database.query(`${publicationSelect} ${where.length?`where ${where.join(" and ")}`:""} order by p.created_at desc limit $${values.length-1} offset $${values.length}`,values)).rows.map(decoratePublication);
   });
   app.post("/admin/catalog/publications",async(request,reply)=>{const body=normalizedInput(asObject(request.body));const row=await insertRow<any>(context.database,"publications",{...body,id:randomUUID()},publicationColumns,{visibility:"public",is_active:true,is_seasonal:false,sort_rank:0,price_mxn:0});await audit(request,"catalog.publication_created","publication",row.id,body);reply.status(201);return decoratePublication(row);});
@@ -152,8 +156,8 @@ export async function registerCatalog(app: FastifyInstance, context: AppContext)
   const updatePublication=async(request:any)=>{const row=await patchRow<any>(context.database,"publications",request.params.id,normalizedInput(asObject(request.body)),publicationColumns);await audit(request,"catalog.publication_updated","publication",row.id,request.body);return decoratePublication(row);};
   app.patch("/admin/catalog/publications/:id",updatePublication);app.post("/admin/catalog/publications/:id",updatePublication);
   app.delete<{Params:{id:string}}>("/admin/catalog/publications/:id",async(request,reply)=>{await deleteRow(context.database,"publications",request.params.id);await audit(request,"catalog.publication_deleted","publication",request.params.id);reply.status(204).send();});
-  app.post<{Params:{id:string}}>("/admin/catalog/publications/:id/publish",async(request)=>{const row=(await context.database.query("update publications set is_active=true,visibility='public',updated_at=now() where id=$1 returning *",[request.params.id])).rows[0];if(!row)throw new HttpError(404,"Publicación no encontrada");await audit(request,"catalog.publication_published","publication",request.params.id);return decoratePublication(row);});
-  app.post<{Params:{id:string}}>("/admin/catalog/publications/:id/unpublish",async(request)=>{const row=(await context.database.query("update publications set is_active=false,visibility='hidden',updated_at=now() where id=$1 returning *",[request.params.id])).rows[0];if(!row)throw new HttpError(404,"Publicación no encontrada");await audit(request,"catalog.publication_unpublished","publication",request.params.id);return decoratePublication(row);});
+  app.post<{Params:{id:string}}>("/admin/catalog/publications/:id/publish",async(request)=>{const row=(await context.database.query("update publications set is_active=true,visibility='public',updated_at=now() where id=$1 and garment_type in ('tshirt','hoodie') returning *",[request.params.id])).rows[0];if(!row)throw new HttpError(404,"Publicación no encontrada");await audit(request,"catalog.publication_published","publication",request.params.id);return decoratePublication(row);});
+  app.post<{Params:{id:string}}>("/admin/catalog/publications/:id/unpublish",async(request)=>{const row=(await context.database.query("update publications set is_active=false,visibility='hidden',updated_at=now() where id=$1 and garment_type in ('tshirt','hoodie') returning *",[request.params.id])).rows[0];if(!row)throw new HttpError(404,"Publicación no encontrada");await audit(request,"catalog.publication_unpublished","publication",request.params.id);return decoratePublication(row);});
   app.get<{Params:{id:string}}>("/admin/catalog/publications/:id/mockups",async(request)=>(await context.database.query("select * from publication_mockups where publication_id=$1 order by created_at",[request.params.id])).rows);
   app.post<{Params:{id:string}}>("/admin/catalog/publications/:id/mockups",async(request,reply)=>{const row=await insertRow<any>(context.database,"publication_mockups",{...asObject(request.body),id:randomUUID(),publication_id:request.params.id},["id","publication_id","variant_id","garment_color","view_side","mockup_asset_id","mockup_url"],{view_side:"front"});reply.status(201);return row;});
   app.patch<{Params:{id:string;mockup_id:string}}>("/admin/catalog/publications/:id/mockups/:mockup_id",async(request)=>patchPublicationMockup(context,request.params.id,request.params.mockup_id,asObject(request.body)));

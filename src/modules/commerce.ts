@@ -6,6 +6,7 @@ import type pg from "pg";
 import { config } from "../config.js";
 import { asObject, bearerToken, HttpError, randomToken, secureEqual, sha256, verifyAccessToken, withProviderMetrics } from "../platform.js";
 import { quoteNational } from "../providers/skydropx.js";
+import { requireSupportedGarmentType } from "./garment-types.js";
 import type { AppContext } from "../types.js";
 
 function cartItem(row: any): any {
@@ -57,7 +58,7 @@ function cartSummary(cart: any, items: any[]): any {
 
 async function cartResponse(context: AppContext, request: FastifyRequest, id: string, client: any = context.database): Promise<any> {
   const cart = await cartForAccess(context, request, id, client);
-  const items: any[] = (await client.query("select * from cart_items where cart_id=$1 order by created_at", [id])).rows.map(cartItem);
+  const items: any[] = (await client.query("select * from cart_items where cart_id=$1 and garment_type in ('tshirt','hoodie') order by created_at", [id])).rows.map(cartItem);
   return cartSummary(cart, items);
 }
 
@@ -131,6 +132,7 @@ function inventoryKey(item: any): any[] {
 async function reserveStock(client: pg.PoolClient, items: any[], attemptId: string): Promise<any[]> {
   const reservations: any[] = [];
   for (const item of items) {
+    requireSupportedGarmentType(item.garment_type);
     const stock = await client.query<any>(`
       select * from inventory_items where garment_type=$1 and garment_model=$2 and color=$3 and size=$4 and grammage_g=$5 and fit=$6 for update
     `, inventoryKey(item));
@@ -174,7 +176,7 @@ async function createOrder(client: pg.PoolClient, checkout: any, attempt: any): 
       orderAccessToken: await replaceOrderAccessToken(client, existing.rows[0].id)
     };
   }
-  const items = (await client.query("select * from cart_items where cart_id=$1 order by created_at", [checkout.cart_id])).rows;
+  const items = (await client.query("select * from cart_items where cart_id=$1 and garment_type in ('tshirt','hoodie') order by created_at", [checkout.cart_id])).rows;
   const primaryDrop = items.find((item) => item.drop_id)?.drop_id ?? null;
   let dropNumber: number | null = null;
   if (primaryDrop) {
@@ -528,7 +530,7 @@ export async function registerCommerce(app: FastifyInstance, context: AppContext
     const body=asObject(request.body);
     const publication=(await context.database.query<any>(`
       select * from publications
-      where (slug=$1 or id::text=$2) and is_active=true and visibility in ('public','visible') limit 1
+      where (slug=$1 or id::text=$2) and is_active=true and visibility in ('public','visible') and garment_type in ('tshirt','hoodie') limit 1
     `,[body.publication_slug,body.publication_id??null])).rows[0];
     if(!publication)throw new HttpError(404,"Publicación no encontrada");
     const designVariantId=body.design_variant_id===undefined||body.design_variant_id===null||body.design_variant_id===""?null:requiredText(body.design_variant_id,"design_variant_id",64);
@@ -552,8 +554,9 @@ export async function registerCommerce(app: FastifyInstance, context: AppContext
     const improveQuality=Boolean(body.improve_quality);
     const unitPrice=await customizerUnitPrice(context,front.length+back.length,improveQuality);
     const quantity=boundedPositiveInteger(body.quantity,"quantity",25);
+    const garmentType = requireSupportedGarmentType(requiredText(body.garment_type,"garment_type",64));
     await context.database.query(`insert into cart_items(id,cart_id,item_type,garment_type,garment_model,color,size,grammage_g,fit,quantity,unit_price_mxn,custom_front,custom_back,custom_note,improve_quality,meta)
-      values($1,$2,'customized',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,[randomUUID(),request.params.cart_id,requiredText(body.garment_type,"garment_type",64),optionalText(body.garment_model,"garment_model",64),requiredText(body.color,"color",64),requiredText(body.size,"size",32),boundedPositiveInteger(body.grammage_g,"grammage_g",1_000),optionalText(body.fit,"fit",64),quantity,unitPrice,JSON.stringify(front),JSON.stringify(back),body.note??null,improveQuality,body.meta??null]);
+      values($1,$2,'customized',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,[randomUUID(),request.params.cart_id,garmentType,optionalText(body.garment_model,"garment_model",64),requiredText(body.color,"color",64),requiredText(body.size,"size",32),boundedPositiveInteger(body.grammage_g,"grammage_g",1_000),optionalText(body.fit,"fit",64),quantity,unitPrice,JSON.stringify(front),JSON.stringify(back),body.note??null,improveQuality,body.meta??null]);
     reply.status(201);return cartResponse(context,request,request.params.cart_id);
   });
   app.delete<{Params:{cart_id:string;item_id:string}}>("/cart/sessions/:cart_id/items/:item_id",async(request)=>{await cartForAccess(context,request,request.params.cart_id);await context.database.query("delete from cart_items where id=$1 and cart_id=$2",[request.params.item_id,request.params.cart_id]);return cartResponse(context,request,request.params.cart_id);});
