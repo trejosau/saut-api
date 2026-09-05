@@ -139,6 +139,7 @@ async function findOrCreateEmailAccount(context: AppContext, email: string): Pro
   if (found.rows[0]) {
     if (found.rows[0].status !== "active") throw new HttpError(403, "Cuenta inactiva");
     await context.database.query("update accounts set last_login_at = now(), updated_at = now() where id = $1", [found.rows[0].id]);
+    await context.database.query("update account_identities set email_verified=true, last_used_at=now() where account_id=$1 and provider='email' and email_normalized=$2", [found.rows[0].id, email]);
     return { account: found.rows[0], created: false };
   }
   if (!config.AUTH_AUTO_CREATE) throw new HttpError(404, "Cuenta no encontrada");
@@ -496,8 +497,58 @@ export async function registerAuth(app: FastifyInstance, context: AppContext): P
     const result = await context.database.query<any>("select * from accounts where id = $1", [actor.accountId]);
     const account = result.rows[0];
     return { account_id: account.id, session_id: actor.sessionId, actor_type: account.actor_type, status: account.status, display_name: account.display_name,
-      primary_email: account.primary_email, roles: actor.roles, permissions: actor.permissions,
+      primary_email: account.primary_email,
+      email_verified: Boolean((await context.database.query("select 1 from account_identities where account_id=$1 and email_normalized=lower($2) and email_verified=true limit 1", [actor.accountId, account.primary_email])).rows[0]),
+      roles: actor.roles, permissions: actor.permissions,
       mfa_required: actor.mfaRequired ?? false, mfa_enabled: actor.mfaEnabled ?? false, mfa_verified: Boolean(actor.mfaVerifiedAt) };
+  });
+
+  app.patch("/auth/me", async (request) => {
+    const actor = await authenticate(request);
+    const body = z.object({ display_name: z.string().trim().min(1).max(120) }).strict().parse(request.body);
+    const result = await context.database.query("update accounts set display_name=$2, updated_at=now() where id=$1 returning display_name", [actor.accountId, body.display_name]);
+    return result.rows[0];
+  });
+
+  const addressSchema = z.object({
+    label: z.string().trim().min(1).max(80),
+    line1: z.string().trim().min(1).max(200),
+    line2: z.string().trim().max(200).nullable().optional(),
+    city: z.string().trim().min(1).max(100),
+    state: z.string().trim().min(1).max(100),
+    postal_code: z.string().trim().regex(/^\d{5}$/),
+    country: z.literal("MX").default("MX"),
+  }).strict();
+  const addressFields = "id,label,line1,line2,city,state,postal_code,country";
+  app.get("/auth/me/addresses", async (request) => {
+    const actor = await authenticate(request);
+    return (await context.database.query(`select ${addressFields} from account_addresses where account_id=$1 order by created_at,id`, [actor.accountId])).rows;
+  });
+  app.post("/auth/me/addresses", async (request, reply) => {
+    const actor = await authenticate(request);
+    const body = addressSchema.parse(request.body);
+    const result = await context.database.query(`insert into account_addresses(id,account_id,label,line1,line2,city,state,postal_code,country)
+      values($1,$2,$3,$4,$5,$6,$7,$8,$9) returning ${addressFields}`,
+    [randomUUID(),actor.accountId,body.label,body.line1,body.line2 || null,body.city,body.state,body.postal_code,body.country]);
+    reply.status(201);
+    return result.rows[0];
+  });
+  app.patch<{ Params: { id: string } }>("/auth/me/addresses/:id", async (request) => {
+    const actor = await authenticate(request);
+    const id = z.uuid().parse(request.params.id);
+    const body = addressSchema.parse(request.body);
+    const result = await context.database.query(`update account_addresses set label=$3,line1=$4,line2=$5,city=$6,state=$7,postal_code=$8,country=$9,updated_at=now()
+      where id=$1 and account_id=$2 returning ${addressFields}`,
+    [id,actor.accountId,body.label,body.line1 || null,body.line2 || null,body.city,body.state,body.postal_code,body.country]);
+    if (!result.rows[0]) throw new HttpError(404, "Dirección no encontrada");
+    return result.rows[0];
+  });
+  app.delete<{ Params: { id: string } }>("/auth/me/addresses/:id", async (request) => {
+    const actor = await authenticate(request);
+    const id = z.uuid().parse(request.params.id);
+    const result = await context.database.query("delete from account_addresses where id=$1 and account_id=$2", [id,actor.accountId]);
+    if (!result.rowCount) throw new HttpError(404, "Dirección no encontrada");
+    return { deleted: true };
   });
 
   app.post("/internal/validate-token", async (request) => {

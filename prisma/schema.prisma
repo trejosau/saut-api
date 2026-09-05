@@ -68,6 +68,24 @@ model accounts {
   recovery_codes               recovery_codes[]
   webauthn_credentials         webauthn_credentials[]
   webauthn_challenges          webauthn_challenges[]
+  account_addresses           account_addresses[]
+}
+
+model account_addresses {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  account_id  String   @db.Uuid
+  label       String
+  line1       String
+  line2       String?
+  city        String
+  state       String
+  postal_code String
+  country     String   @default("MX")
+  created_at  DateTime @default(now()) @db.Timestamptz(6)
+  updated_at  DateTime @default(now()) @db.Timestamptz(6)
+  accounts    accounts @relation(fields: [account_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([account_id])
 }
 
 model account_mfa {
