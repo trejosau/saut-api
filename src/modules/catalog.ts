@@ -166,7 +166,22 @@ export async function registerCatalog(app: FastifyInstance, context: AppContext)
   const registerCrud=(base:string,table:string,columns:readonly string[],search:string,filters:string[]=[],touchUpdatedAt=true)=>{
     app.get(base,async(request)=>listGeneric(context,table,asObject(request.query),search,filters));
     app.post(base,async(request,reply)=>{const row=await insertRow<any>(context.database,table,{...normalizedInput(asObject(request.body)),id:randomUUID()},columns);await audit(request,`${table}.created`,table,row.id,request.body);reply.status(201);return row;});
-    app.get<{Params:{id:string}}>(`${base}/:id`,async(request)=>{const row=(await context.database.query(`select * from ${table} where id=$1`,[request.params.id])).rows[0];if(!row)throw new HttpError(404,"Registro no encontrado");return row;});
+    app.get<{Params:{id:string}}>(`${base}/:id`,async(request)=>{
+      const row=(await context.database.query(`select * from ${table} where id=$1`,[request.params.id])).rows[0];
+      if(!row)throw new HttpError(404,"Registro no encontrado");
+      if (table === "collections_sets" || table === "drops") {
+        const isCollection = table === "collections_sets";
+        const relation = isCollection ? "collection_set_items" : "drop_items";
+        const foreignKey = isCollection ? "collection_id" : "drop_id";
+        const items = (await context.database.query(
+          `${publicationSelect} join ${relation} membership on membership.publication_id=p.id where membership.${foreignKey}=$1 order by membership.position_index`,
+          [row.id]
+        )).rows.map(decoratePublication);
+        // Preserve the existing flat fields for other consumers.
+        return { ...row, [isCollection ? "collection" : "drop"]: row, items };
+      }
+      return row;
+    });
     app.patch<{Params:{id:string}}>(`${base}/:id`,async(request)=>{const row=await patchRow<any>(context.database,table,request.params.id,normalizedInput(asObject(request.body)),columns,touchUpdatedAt);await audit(request,`${table}.updated`,table,row.id,request.body);return row;});
     app.delete<{Params:{id:string}}>(`${base}/:id`,async(request,reply)=>{await deleteRow(context.database,table,request.params.id);await audit(request,`${table}.deleted`,table,request.params.id);reply.status(204).send();});
   };
